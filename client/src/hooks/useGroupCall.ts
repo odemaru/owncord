@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import {
   captureDisplay,
+  captureLocalMedia,
   applyVideoSenderQuality,
   createPlaceholderAudioTrack,
   createPlaceholderVideoTrack,
@@ -699,6 +700,191 @@ export function useGroupCall({ socket, selfUser, settings, toast, sounds }) {
     settings?.compressorKnee,
     settings?.makeupGainDb,
   ]);
+
+  // --- Live mic-swap (group call) -------------------------------------
+  // Зеркало useCall.ts — но проходит по всем PC из pcsRef и заменяет
+  // трек у каждого пира. Фильтры/устройство применяются «на лету», без
+  // переподключения к группе и без обрыва RTP.
+  const swappingMicRef = useRef(false);
+  useEffect(() => {
+    if (stateRef.current !== 'in-call') return undefined;
+    if (pcsRef.current.size === 0) return undefined;
+    let cancelled = false;
+
+    (async () => {
+      if (swappingMicRef.current) return;
+      swappingMicRef.current = true;
+      try {
+        // 1) Свежий raw-stream с новым deviceId. Камеру не трогаем.
+        const rawStream = await captureLocalMedia({
+          wantVideo: false,
+          audioDeviceId: settings?.inputDeviceId,
+        });
+        if (cancelled) {
+          rawStream.getTracks().forEach((t) => {
+            try {
+              t.stop();
+            } catch {
+              /* */
+            }
+          });
+          return;
+        }
+        const newRawMic = rawStream.getAudioTracks()[0] || null;
+        if (!newRawMic) return;
+
+        const wasEnabled = audioTrackRef.current?.enabled ?? true;
+
+        // 2) Pipeline (web only, см. подробный комментарий в join()).
+        let newProcessedMic: MediaStreamTrack = newRawMic;
+        let newPipeline: any = null;
+        const wantPipeline = settings?.audioFiltersEnabled !== false && !isDesktop();
+        if (wantPipeline) {
+          try {
+            const pipeline = await createMicPipeline(
+              new MediaStream([newRawMic]),
+              pickAudioFilterSettings(settings),
+            );
+            await new Promise((resolve) => setTimeout(resolve, 150));
+            if (cancelled) {
+              try {
+                pipeline.destroy();
+              } catch {
+                /* */
+              }
+              try {
+                newRawMic.stop();
+              } catch {
+                /* */
+              }
+              return;
+            }
+            if (pipeline.context.state === 'running') {
+              newPipeline = pipeline;
+              newProcessedMic = pipeline.outputTrack;
+            } else {
+              console.warn('[useGroupCall] swap pipeline ctx не запустился — fallback на raw');
+              try {
+                pipeline.destroy();
+              } catch {
+                /* */
+              }
+            }
+          } catch (e) {
+            console.warn('[useGroupCall] swap: pipeline build failed:', e);
+          }
+        }
+        newProcessedMic.enabled = wasEnabled;
+
+        // 3) Если идёт демка со звуком — пересобираем mic+screen микшер
+        //    с новым mic'ом (см. useCall.ts с тем же объяснением).
+        let newMixer: MicScreenMixer | null = null;
+        let trackForSender: MediaStreamTrack = newProcessedMic;
+        if (micScreenMixerRef.current && screenAudioTrackRef.current) {
+          try {
+            newMixer = createMicScreenMixer({
+              micTrack: newProcessedMic,
+              screenAudioTrack: screenAudioTrackRef.current,
+            });
+            trackForSender = newMixer.outputTrack;
+          } catch (e) {
+            console.warn('[useGroupCall] swap: mixer rebuild failed:', e);
+          }
+        }
+
+        // 4) Replace track на КАЖДОМ pc. Если у одного из пиров отвалится —
+        //    остальные всё равно получат новый звук.
+        const peers = Array.from(pcsRef.current.entries());
+        let anyReplaced = false;
+        for (const [peerId, pc] of peers) {
+          if (cancelled) break;
+          const sender = (pc as any).__audioSender;
+          if (!sender) continue;
+          try {
+            await sender.replaceTrack(trackForSender);
+            anyReplaced = true;
+          } catch (e) {
+            console.warn(`[useGroupCall] swap replaceTrack peer=${peerId} failed:`, e);
+          }
+        }
+
+        if (cancelled || !anyReplaced) {
+          try {
+            newPipeline?.destroy();
+          } catch {
+            /* */
+          }
+          try {
+            newMixer?.destroy();
+          } catch {
+            /* */
+          }
+          try {
+            newRawMic.stop();
+          } catch {
+            /* */
+          }
+          return;
+        }
+
+        // 5) Демонтаж старого. Pipeline.destroy() уберёт свой raw + output;
+        //    иначе явно стопаем старый mic-track.
+        const oldMicTrack = audioTrackRef.current;
+        const oldPipeline = micPipelineRef.current;
+        const oldMixer = micScreenMixerRef.current;
+        try {
+          if (oldPipeline) oldPipeline.destroy();
+          else if (oldMicTrack && oldMicTrack !== newProcessedMic) oldMicTrack.stop();
+        } catch {
+          /* */
+        }
+        if (oldMixer && oldMixer !== newMixer) {
+          try {
+            oldMixer.destroy();
+          } catch {
+            /* */
+          }
+        }
+
+        // 6) Обновляем refs и localStream.
+        audioTrackRef.current = newProcessedMic;
+        micPipelineRef.current = newPipeline;
+        micScreenMixerRef.current = newMixer;
+
+        const ls = localStreamRef.current;
+        if (ls) {
+          for (const t of ls.getAudioTracks()) {
+            if (t !== newProcessedMic) {
+              try {
+                ls.removeTrack(t);
+              } catch {
+                /* */
+              }
+            }
+          }
+          try {
+            ls.addTrack(newProcessedMic);
+          } catch {
+            /* track уже там — ок */
+          }
+          localStreamRef.current = new MediaStream(ls.getTracks());
+          setLocalStream(localStreamRef.current);
+        }
+
+        setTimeout(emitMyMedia, 0);
+      } catch (e) {
+        console.warn('[useGroupCall] swapMicrophone failed:', e);
+        toast?.error?.('Не удалось применить новые настройки микрофона');
+      } finally {
+        swappingMicRef.current = false;
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings?.inputDeviceId, settings?.audioFiltersEnabled]);
 
   const toggleDeafen = useCallback(() => {
     const next = !deafenedRef.current;

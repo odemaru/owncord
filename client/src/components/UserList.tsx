@@ -70,7 +70,13 @@ export default function UserList({
   const isGroupActive = (id) => selected?.kind === 'group' && selected.id === id;
 
   return (
-    <div className="flex flex-col h-full">
+    // flex-1 + min-h-0 — UserList сам является flex-child'ом в `aside` (тоже
+    // flex-col, см. Home.tsx). С `h-full` высота получалась = высоте aside,
+    // и UserList выталкивал собственную хедер-секцию profile-bar за нижний
+    // край (последний пользователь оказывался не виден). С flex-1 + min-h-0
+    // он честно делит вертикальное место с profile-bar над собой, а вложенный
+    // скроллер ниже корректно ограничивается оставшейся высотой.
+    <div className="flex-1 min-h-0 flex flex-col">
       <div className="p-3 border-b border-white/10">
         <div className="relative">
           <Search

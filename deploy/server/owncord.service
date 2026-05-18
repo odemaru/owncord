@@ -6,9 +6,9 @@ After=network.target
 Type=simple
 User=owncord
 Group=owncord
-WorkingDirectory=/apps/OwnCord
+WorkingDirectory=/apps/prod/OwnCord
 Environment=NODE_ENV=production
-EnvironmentFile=/apps/OwnCord/server/.env
+EnvironmentFile=/apps/prod/OwnCord/server/.env
 ExecStart=/usr/bin/node server/src/index.js
 ExecStartPost=/usr/local/bin/owncord-notify.sh start
 ExecStopPost=/bin/sh -c '[ "$SERVICE_RESULT" = "success" ] && /usr/local/bin/owncord-notify.sh stop || /usr/local/bin/owncord-notify.sh fail'
@@ -19,7 +19,7 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths=/apps/OwnCord/server
+ReadWritePaths=/apps/prod/OwnCord/server
 
 LimitNOFILE=65535
 

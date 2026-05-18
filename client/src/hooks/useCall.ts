@@ -644,6 +644,227 @@ export function useCall({ socket, selfUser, settings, toast, sounds }) {
     settings.makeupGainDb,
   ]);
 
+  // --- Live mic-swap ---------------------------------------------------
+  // Раньше смена `inputDeviceId` или `audioFiltersEnabled` во время активного
+  // звонка применялась только к СЛЕДУЮЩЕМУ звонку — текущий продолжал
+  // вещать со старого микрофона/без фильтров. Теперь делаем «горячую»
+  // замену: новый getUserMedia → (опционально) новый pipeline →
+  // replaceTrack у audio sender'а → стоп старого. Если активна демонстрация
+  // экрана со звуком, mic+screen микшер пересобирается с новым mic'ом и
+  // ставится на sender вместо чистого мика — иначе пир потеряет либо
+  // голос, либо звук стрима.
+  //
+  // Срабатывает только когда в активном звонке (есть pcRef и audio sender).
+  // Вне звонка (idle/incoming/waiting) — следующий start() сам подхватит
+  // свежие settings через getLocalMedia.
+  const swappingMicRef = useRef(false);
+  useEffect(() => {
+    const pc = pcRef.current;
+    const sender = audioSenderRef.current;
+    if (!pc || !sender) return undefined;
+    const curState = stateRef.current;
+    // 'incoming' — мы ещё не приняли (нет своих треков). 'waiting' — pc снят.
+    if (curState === 'idle' || curState === 'incoming' || curState === 'waiting') {
+      return undefined;
+    }
+    let cancelled = false;
+
+    (async () => {
+      // Если уже идёт swap (быстрая повторная смена) — текущий useEffect
+      // отработает позже сам через cancelled-проверку. Не плодим параллельные
+      // getUserMedia на одном устройстве.
+      if (swappingMicRef.current) return;
+      swappingMicRef.current = true;
+      try {
+        // 1) Свежий raw mic c новым deviceId. Видео не трогаем — у звонка
+        //    может быть камера/демка, их свопить не нужно.
+        const rawStream = await captureLocalMedia({
+          wantVideo: false,
+          audioDeviceId: settings.inputDeviceId,
+        });
+        if (cancelled) {
+          rawStream.getTracks().forEach((t) => {
+            try {
+              t.stop();
+            } catch {
+              /* */
+            }
+          });
+          return;
+        }
+        const newRawMic = rawStream.getAudioTracks()[0] || null;
+        if (!newRawMic) return;
+
+        // Сохраняем mute-state и проставим его на новом треке: иначе
+        // нажатый mute «отвалится» в момент свопа.
+        const wasEnabled = micTrackRef.current?.enabled ?? true;
+
+        // 2) Pipeline (web only). На десктопе всегда обходим — см. подробный
+        //    комментарий в getLocalMedia выше.
+        let newProcessedMic: MediaStreamTrack = newRawMic;
+        let newPipeline: any = null;
+        const wantPipeline = settings?.audioFiltersEnabled !== false && !isDesktop();
+        if (wantPipeline) {
+          try {
+            const pipeline = await createMicPipeline(
+              new MediaStream([newRawMic]),
+              pickAudioFilterSettings(settings),
+            );
+            await new Promise((resolve) => setTimeout(resolve, 150));
+            if (cancelled) {
+              try {
+                pipeline.destroy();
+              } catch {
+                /* */
+              }
+              try {
+                newRawMic.stop();
+              } catch {
+                /* */
+              }
+              return;
+            }
+            if (pipeline.context.state === 'running') {
+              newPipeline = pipeline;
+              newProcessedMic = pipeline.outputTrack;
+            } else {
+              console.warn(
+                '[useCall] mic swap pipeline ctx не запустился — fallback на raw',
+              );
+              try {
+                pipeline.destroy();
+              } catch {
+                /* */
+              }
+            }
+          } catch (e) {
+            console.warn('[useCall] swap: pipeline build failed, raw fallback:', e);
+          }
+        }
+        newProcessedMic.enabled = wasEnabled;
+
+        // 3) Если активна демка со звуком — пересобираем mic+screen микшер
+        //    с новым mic'ом. Иначе на sender'е останется output старого
+        //    микшера, который держит ссылку на убитый raw mic.
+        let newMixer: MicScreenMixer | null = null;
+        let trackForSender: MediaStreamTrack = newProcessedMic;
+        if (micScreenMixerRef.current && screenAudioTrackRef.current) {
+          try {
+            newMixer = createMicScreenMixer({
+              micTrack: newProcessedMic,
+              screenAudioTrack: screenAudioTrackRef.current,
+            });
+            trackForSender = newMixer.outputTrack;
+          } catch (e) {
+            console.warn('[useCall] swap: mixer rebuild failed:', e);
+            // Без миксера пир не услышит screen-audio, но услышит наш голос.
+          }
+        }
+
+        // 4) Replace track на sender'е. Если упало — откатываем новые ресурсы.
+        try {
+          await sender.replaceTrack(trackForSender);
+        } catch (e) {
+          console.warn('[useCall] swap: replaceTrack failed:', e);
+          try {
+            newPipeline?.destroy();
+          } catch {
+            /* */
+          }
+          try {
+            newMixer?.destroy();
+          } catch {
+            /* */
+          }
+          try {
+            newRawMic.stop();
+          } catch {
+            /* */
+          }
+          return;
+        }
+        if (cancelled) {
+          // Если useEffect перезапустился, пока мы ждали replaceTrack —
+          // следующий проход подменит трек ещё раз; этот выкидываем.
+          try {
+            newPipeline?.destroy();
+          } catch {
+            /* */
+          }
+          try {
+            newMixer?.destroy();
+          } catch {
+            /* */
+          }
+          try {
+            newRawMic.stop();
+          } catch {
+            /* */
+          }
+          return;
+        }
+
+        // 5) Демонтаж старого. Pipeline.destroy() гасит свой rawStream и
+        //    outputTrack — не надо их отдельно стопать. Если pipeline'а не
+        //    было, явно стопаем старый mic-трек.
+        const oldMicTrack = micTrackRef.current;
+        const oldPipeline = micPipelineRef.current;
+        const oldMixer = micScreenMixerRef.current;
+        try {
+          if (oldPipeline) oldPipeline.destroy();
+          else if (oldMicTrack && oldMicTrack !== newProcessedMic) oldMicTrack.stop();
+        } catch {
+          /* */
+        }
+        if (oldMixer && oldMixer !== newMixer) {
+          try {
+            oldMixer.destroy();
+          } catch {
+            /* */
+          }
+        }
+
+        // 6) Обновляем refs и localStream (для UI: speaking detector, метр).
+        micTrackRef.current = newProcessedMic;
+        micPipelineRef.current = newPipeline;
+        micScreenMixerRef.current = newMixer;
+
+        const ls = localStreamRef.current;
+        if (ls) {
+          for (const t of ls.getAudioTracks()) {
+            if (t !== newProcessedMic) {
+              try {
+                ls.removeTrack(t);
+              } catch {
+                /* */
+              }
+            }
+          }
+          try {
+            ls.addTrack(newProcessedMic);
+          } catch {
+            /* track уже добавлен — ок */
+          }
+          setLocal(new MediaStream(ls.getTracks()));
+        }
+
+        // Сообщаем пиру актуальное состояние mic (на случай если до
+        // свопа было muted — бывает важно для индикатора у пира).
+        setTimeout(emitMyMedia, 0);
+      } catch (e) {
+        console.warn('[useCall] swapMicrophone failed:', e);
+        toast?.error?.('Не удалось применить новые настройки микрофона');
+      } finally {
+        swappingMicRef.current = false;
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.inputDeviceId, settings.audioFiltersEnabled]);
+
   // applyLocalTracks больше не нужен — createPeerConnection сам подвязывает
   // треки через addTrack/addTransceiver. Оставлено как явный no-op-маркер.
 

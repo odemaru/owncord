@@ -5,7 +5,7 @@
 set -euo pipefail
 
 SRC="${1:?usage: owncord-deploy.sh <source-dir>}"
-TARGET="/apps/OwnCord"
+TARGET="/apps/prod/OwnCord"
 
 if [[ ! -d "$SRC" ]]; then
   echo "source dir not found: $SRC" >&2

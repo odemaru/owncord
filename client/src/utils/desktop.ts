@@ -75,8 +75,18 @@ type ProcAudioApi = {
   stop: () => Promise<true>;
 };
 
+type WindowControlsApi = {
+  minimize: () => Promise<void>;
+  toggleMaximize: () => Promise<void>;
+  close: () => Promise<void>;
+  isMaximized: () => Promise<boolean>;
+  onState: (handler: (state: { maximized: boolean }) => void) => () => void;
+};
+
 type ElectronApi = {
   isDesktop: true;
+  // 'win32' | 'darwin' | 'linux' (см. process.platform в Node).
+  platform?: string;
   getVersion?: () => Promise<string>;
   // Перезапуск с правами администратора (Windows). Опционален, потому что
   // в старых сборках preload этого метода ещё нет (graceful-fallback).
@@ -90,6 +100,10 @@ type ElectronApi = {
   installUpdate?: () => Promise<true>;
   checkForUpdates?: () => Promise<{ ok: boolean; version?: string; error?: string }>;
   getUpdateState?: () => Promise<UpdateEvent | null>;
+  // Кастомный титлбар: см. desktop/preload.js. Старые сборки без этого
+  // API считаются веб-аналогом — TitleBar сам graceful'нется и не
+  // отрендерится (см. components/TitleBar.tsx).
+  windowControls?: WindowControlsApi;
   // procAudio — опционален, потому что старые сборки десктопа без этого
   // API всё ещё могут существовать в природе (постепенный rollout
   // обновления). Renderer должен делать optional-chain ко всем
@@ -105,6 +119,29 @@ declare global {
 
 export function isDesktop(): boolean {
   return typeof window !== 'undefined' && !!window.electronAPI?.isDesktop;
+}
+
+/**
+ * Платформа десктопа: 'win32' | 'darwin' | 'linux' | null.
+ * Используется кастомным титлбаром, чтобы решить, на какой стороне
+ * рисовать кнопки (Windows-конвенция — справа, macOS — слева).
+ * На вебе и в старых сборках без preload.platform — null.
+ */
+export function getDesktopPlatform(): string | null {
+  if (!isDesktop()) return null;
+  return window.electronAPI?.platform || null;
+}
+
+/**
+ * Доступ к window-controls API кастомного титлбара. Возвращает null
+ * на вебе или если в текущей сборке десктопа preload ещё не выставил
+ * windowControls (старая версия). UI должен это учитывать и в случае
+ * null прятать кастомный титлбар целиком — иначе пользователю не на
+ * что будет нажать, чтобы свернуть/закрыть окно.
+ */
+export function getWindowControls(): WindowControlsApi | null {
+  if (!isDesktop()) return null;
+  return window.electronAPI?.windowControls || null;
 }
 
 /**

@@ -9,8 +9,18 @@ import { MutesProvider } from './context/MutesContext';
 import { ConfigProvider } from './context/ConfigContext';
 import { GroupsProvider } from './context/GroupsContext';
 import UpdateToast from './components/UpdateToast';
+import TitleBar from './components/TitleBar';
 import { attachNotificationClickHandler } from './utils/push';
+import { isDesktop } from './utils/desktop';
+import '@fontsource-variable/inter';
 import './index.css';
+
+// Маркируем body для CSS, который оставляет 32px паддинга под кастомный
+// титлбар (см. index.css → body.is-desktop). Делаем это синхронно ДО
+// первого рендера, чтобы не было «прыжка» layout'а в момент гидрации.
+if (typeof document !== 'undefined' && isDesktop()) {
+  document.body.classList.add('is-desktop');
+}
 
 // Слушать клики по push-уведомлениям и эмитить кастомное событие, на
 // которое подписан Home.jsx (для открытия нужного чата).
@@ -39,6 +49,10 @@ ReactDOM.createRoot(document.getElementById('root')).render(
             <AuthProvider>
               <MutesProvider>
                 <GroupsProvider>
+                  {/* TitleBar рендерится только в Electron (внутри сам делает
+                      isDesktop-чек). Кладём поверх всего, position:fixed
+                      внутри. На вебе — null, никаких лишних DOM-узлов. */}
+                  <TitleBar />
                   <App />
                   <UpdateToast />
                 </GroupsProvider>

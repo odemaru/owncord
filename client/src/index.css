@@ -24,6 +24,14 @@
     box-sizing: border-box;
   }
 
+  /* Кастомный титлбар Electron (см. components/TitleBar.tsx) занимает
+     32px сверху, position:fixed. Чтобы реальный контент не уходил под
+     него, добавляем эквивалентный padding к #root в десктопе. Класс
+     ставится из main.tsx до первого рендера, чтобы не было прыжка. */
+  body.is-desktop #root {
+    padding-top: calc(env(safe-area-inset-top) + 32px);
+  }
+
   body {
     @apply bg-bg-0 text-slate-100 font-sans antialiased;
     font-feature-settings: 'cv11', 'ss01';

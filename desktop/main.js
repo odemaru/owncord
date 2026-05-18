@@ -108,6 +108,16 @@ function createWindow() {
     autoHideMenuBar: true,
     title: 'OwnCord',
     icon: WINDOW_ICON,
+    // Полностью кастомный титлбар: убираем нативный системный фрейм
+    // (на Windows это и заголовок, и кнопки управления). Клиент рисует
+    // свой бар на 32px сверху (см. client/src/components/TitleBar.tsx),
+    // получая нативные действия через IPC 'window:minimize|maximize|close'.
+    // На macOS оставляем дефолт — frame:false без titleBarStyle делает окно
+    // без traffic light, что нежелательно: пользователи macOS ждут
+    // штатные «светофоры». Поэтому на дарвине ставим titleBarStyle:'hidden',
+    // оставляющий native traffic lights поверх нашего бара.
+    frame: process.platform !== 'darwin' ? false : undefined,
+    titleBarStyle: process.platform === 'darwin' ? 'hidden' : undefined,
     // При autostart с --hidden окно создаётся скрытым (работает в трее).
     // Юзер раскрывает его кликом по tray-иконке.
     show: !startHidden,
@@ -148,19 +158,31 @@ function createWindow() {
   // Скрываем стандартное меню (File/Edit/...) — у нас своё UI.
   Menu.setApplicationMenu(null);
 
-  // DevTools-хоткеи временно отключены: продакшен-юзеру они без надобности,
-  // а для разработки можно раскомментить блок ниже либо открывать консоль
-  // программно из main (`mainWindow.webContents.openDevTools()`).
-  //
-  // mainWindow.webContents.on('before-input-event', (_e, input) => {
-  //   if (input.type !== 'keyDown') return;
-  //   const isF12 = input.key === 'F12';
-  //   const isCtrlShiftI =
-  //     (input.control || input.meta) && input.shift && (input.key === 'I' || input.key === 'i');
-  //   if (isF12 || isCtrlShiftI) {
-  //     mainWindow.webContents.toggleDevTools();
-  //   }
-  // });
+  // DevTools и reload-хоткеи: F12 / Ctrl+Shift+I открывают консоль,
+  // Ctrl+R / F5 — обычный reload, Ctrl+Shift+R — hard reload с очисткой кеша.
+  mainWindow.webContents.on('before-input-event', (_e, input) => {
+    if (input.type !== 'keyDown') return;
+    const ctrl = input.control || input.meta;
+    const isF12 = input.key === 'F12';
+    const isCtrlShiftI = ctrl && input.shift && (input.key === 'I' || input.key === 'i');
+    if (isF12 || isCtrlShiftI) {
+      mainWindow.webContents.toggleDevTools();
+      return;
+    }
+    const isF5 = input.key === 'F5';
+    const isCtrlR = ctrl && !input.shift && (input.key === 'R' || input.key === 'r');
+    const isCtrlShiftR = ctrl && input.shift && (input.key === 'R' || input.key === 'r');
+    if (isCtrlShiftR) {
+      // Hard reload: чистим HTTP-кеш сессии и грузим страницу заново.
+      mainWindow.webContents.session.clearCache().finally(() => {
+        mainWindow.webContents.reloadIgnoringCache();
+      });
+      return;
+    }
+    if (isF5 || isCtrlR) {
+      mainWindow.webContents.reload();
+    }
+  });
 
   loadServerUrl();
 
@@ -203,6 +225,27 @@ function createWindow() {
     });
     mainWindow = null;
   });
+
+  // События maximize/unmaximize нужны кастомному титлбару, чтобы
+  // переключить иконку «развернуть»↔«восстановить». Без этого пользователь,
+  // двойным кликом по бару (или Win+Up) развернувший окно, увидит ту же
+  // иконку «развернуть», и кнопка перестанет соответствовать действию.
+  const sendMaxState = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    try {
+      mainWindow.webContents.send('window:state', { maximized: mainWindow.isMaximized() });
+    } catch {
+      /* renderer мог ещё не подняться — на did-finish-load догоним */
+    }
+  };
+  mainWindow.on('maximize', sendMaxState);
+  mainWindow.on('unmaximize', sendMaxState);
+  // На enter-full-screen и leave-full-screen (macOS / F11) тоже шлём,
+  // чтобы UI знал, что окно сейчас «во весь экран». Это нужно потому
+  // что в fullscreen наш кастомный титлбар скрывать необязательно, но
+  // иконка должна корректно отражать состояние.
+  mainWindow.on('enter-full-screen', sendMaxState);
+  mainWindow.on('leave-full-screen', sendMaxState);
 }
 
 // --- Tray + window helpers -----------------------------------------
@@ -396,6 +439,44 @@ ipcMain.handle('shortcuts:get', () => cfg?.shortcuts || {});
 // в сайдбаре настроек, чтобы пользователь видел, какой билд у него стоит
 // (особенно полезно при автообновлениях).
 ipcMain.handle('app:version', () => app.getVersion());
+
+// --- Кастомный титлбар: управление окном ----------------------------
+//
+// Renderer рисует свои кнопки min/max/close (см. TitleBar.tsx), а
+// действия делегирует сюда через IPC. Без этого, при frame:false,
+// у юзера не будет никакого способа закрыть/свернуть/развернуть окно.
+//
+// window:close уважает closeToTray-настройку (если включена, окно
+// прячется в трей вместо реального quit'а — точно так же, как при
+// нажатии нативного «крестика» был бы close-handler в createWindow).
+// 'window:state' — события для UI: при resize/maximize renderer должен
+// перерисовывать иконку «развернуть»/«восстановить».
+ipcMain.handle('window:minimize', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize();
+});
+
+ipcMain.handle('window:toggle-maximize', () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMaximized()) {
+    mainWindow.unmaximize();
+  } else {
+    mainWindow.maximize();
+  }
+});
+
+ipcMain.handle('window:close', () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  // Просто триггерим обычный close — в createWindow стоит handler,
+  // который при closeToTray=true спрячет окно, иначе app.quit().
+  mainWindow.close();
+});
+
+// Renderer вызывает на mount, чтобы синкнуть начальное состояние
+// иконки maximize/restore (без события).
+ipcMain.handle('window:is-maximized', () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  return mainWindow.isMaximized();
+});
 
 // --- Lifecycle ---------------------------------------------------
 

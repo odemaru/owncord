@@ -17,10 +17,40 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Метка, по которой клиент детектит, что он в десктоп-обёртке.
   isDesktop: true,
 
+  // Платформа Node.js: 'win32' | 'darwin' | 'linux' и т.д. Нужна
+  // кастомному титлбару, чтобы знать, на какой стороне рисовать
+  // кнопки управления (Windows — справа, macOS — слева).
+  platform: process.platform,
+
   // Версия desktop-приложения (из desktop/package.json через app.getVersion()).
   // Используется в SettingsPanel для отображения "OwnCord X.Y.Z" в сайдбаре.
   // Возвращает Promise<string>.
   getVersion: () => ipcRenderer.invoke('app:version'),
+
+  // --- Кастомный титлбар: управление окном ---
+  // frame: false убирает нативные кнопки управления, поэтому renderer
+  // рисует свои (см. client/src/components/TitleBar.tsx) и шлёт сюда
+  // действия. close-handler в main уважает closeToTray-настройку.
+  windowControls: {
+    minimize: () => ipcRenderer.invoke('window:minimize'),
+    toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
+    close: () => ipcRenderer.invoke('window:close'),
+    isMaximized: () => ipcRenderer.invoke('window:is-maximized'),
+    // Подписка на 'window:state' — main шлёт при maximize/unmaximize/
+    // enter-full-screen/leave-full-screen. handler получает {maximized:bool}.
+    // Возвращает unsubscribe.
+    onState: (handler) => {
+      const listener = (_e, payload) => {
+        try {
+          handler?.(payload || {});
+        } catch (err) {
+          console.warn('window:state handler failed:', err);
+        }
+      };
+      ipcRenderer.on('window:state', listener);
+      return () => ipcRenderer.removeListener('window:state', listener);
+    },
+  },
 
   // Перезапустить приложение с правами администратора (Windows). Покажет
   // UAC-prompt; при согласии запустит новый elevated instance и закроет

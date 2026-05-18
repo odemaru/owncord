@@ -247,6 +247,31 @@ export function AudioTab() {
     settings.makeupGainDb,
   ]);
 
+  // Если во время активного теста юзер меняет микрофон в выпадающем
+  // списке — рестартим тест на новом устройстве. updateSettings выше
+  // не помогает: deviceId фиксируется в getUserMedia при startMicTest,
+  // и без рестарта юзер продолжал бы слышать звук со старого мика, что
+  // полностью обесценивало бы тест («не слышу разницы между гарнитурой
+  // и встроенным микрофоном»).
+  useEffect(() => {
+    if (!isTestingMic) return undefined;
+    // stopMicTest синхронно гасит pipeline + audio-loopback, после чего
+    // мелким setTimeout(50ms) даём React один цикл на ре-рендер с
+    // isTestingMic=false и стартуем заново. cleanup перебивает таймер,
+    // если устройство сменили опять до того, как пере-старт случился.
+    stopMicTest();
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      if (cancelled) return;
+      startMicTest();
+    }, 50);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.inputDeviceId]);
+
   const startMicTest = async () => {
     try {
       const audioConstraints: any = {

@@ -1,6 +1,6 @@
 {
   "name": "owncord",
-  "version": "0.8.11",
+  "version": "0.9.1",
   "private": true,
   "description": "Self-hosted minimal messenger with voice/video calls and screen sharing",
   "license": "MIT",
