@@ -93,10 +93,23 @@ export function createPlaceholderAudioTrack() {
 // другой профиль браузера), Chrome бросает OverconstrainedError —
 // отлавливаем и fallback'имся на «default»-источник, иначе юзер будет
 // «немым» без видимых причин.
-export async function captureLocalMedia({ wantVideo = false, audioDeviceId = null } = {}) {
+// aiNoiseSuppression — работает ли наша нейросетевая ступень (FastEnhancer /
+// RNNoise) в пайплайне. Если да, браузерный noiseSuppression НУЖНО
+// выключить: WebRTC-шумодав (NS3 от Google) стоит до нашей цепочки, и две
+// подавлялки подряд дают «жёваный», «подводный» звук — модель обучалась на
+// естественном шуме, а получает уже покоцанный NS3 сигнал с музыкальными
+// артефактами. Discord поступает так же: при включённом Krisp нативный NS
+// отключается. echoCancellation, наоборот, оставляем всегда — AEC решает
+// принципиально другую задачу (эхо от собственных динамиков), и шумодав
+// его не заменяет.
+export async function captureLocalMedia({
+  wantVideo = false,
+  audioDeviceId = null,
+  aiNoiseSuppression = false,
+} = {}) {
   const baseAudio = {
     echoCancellation: true,
-    noiseSuppression: true,
+    noiseSuppression: !aiNoiseSuppression,
     autoGainControl: true,
   };
   const video = wantVideo

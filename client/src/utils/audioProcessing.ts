@@ -54,12 +54,26 @@ export type AudioFilterSettings = {
   // Make-up gain после компрессора (компенсация просадки уровня).
   makeupGainDb?: number; // dB
 
-  // AI-шумодав (RNNoise) первой ступенью. Если true, createMicPipeline
-  // попробует загрузить WASM-модуль и вставить RnnoiseWorkletNode
-  // между source и highPass. Загрузка асинхронна: если упадёт (offline,
-  // блокировка CSP, отсутствие AudioWorklet) — пайплайн тихо
-  // обойдётся без AI и продолжит работу. См. utils/audioRnnoise.ts.
+  // AI-шумодав первой ступенью. Если true, createMicPipeline попробует
+  // поднять нейросетевую ступень перед остальной цепочкой. Загрузка
+  // асинхронна: если упадёт (offline, блокировка CSP, отсутствие
+  // AudioWorklet) — пайплайн тихо обойдётся без AI и продолжит работу.
   aiNoiseSuppression?: boolean;
+
+  // Какой движок использовать под AI-шумодав:
+  //   'fastenhancer' — FastEnhancer (ICASSP 2026), по умолчанию. Свежая
+  //                    модель, на слух ближе всего к Krisp/Discord.
+  //   'rnnoise'      — RNNoise (2018). Легче, но заметно слабее давит
+  //                    нестационарный шум (речь на фоне, клавиатура).
+  // При 'fastenhancer' RNNoise остаётся автоматическим резервом: если
+  // FastEnhancer не поднялся, ступень собирается на RNNoise.
+  // См. utils/audioFastEnhancer.ts и utils/audioRnnoise.ts.
+  aiEngine?: 'fastenhancer' | 'rnnoise';
+
+  // Размер модели FastEnhancer: 'tiny' | 'base' | 'small'.
+  // 'small' (по умолчанию) — лучшее качество, ~36% бюджета кадра.
+  // 'base'/'tiny' — для слабых машин и мобилок.
+  aiModelSize?: 'tiny' | 'base' | 'small';
 };
 
 export type MicPipeline = {
@@ -78,6 +92,11 @@ export type MicPipeline = {
   destroy: () => void;
   // Применить новые настройки к работающей цепочке без её пересборки.
   updateSettings: (next: AudioFilterSettings) => void;
+  // Какая AI-ступень фактически поднялась. Не то же самое, что запрошено
+  // в настройках: при провале загрузки здесь будет 'rnnoise' (резерв) или
+  // 'off'. UI показывает это в настройках звука, чтобы юзер понимал,
+  // работает шумодав или молча отвалился.
+  aiEngine: 'fastenhancer' | 'rnnoise' | 'off';
 };
 
 // Дефолты на случай отсутствия настроек. Подобраны под обычный голосовой
@@ -105,7 +124,12 @@ export const DEFAULT_AUDIO_FILTERS: Required<
   noiseGateAttackMs: 10,
   noiseGateReleaseMs: 80,
   makeupGainDb: 0,
-  aiNoiseSuppression: false,
+  // AI-шумодав включён по умолчанию: это главное, что отличает звук
+  // от «сырого микрофона», и ради него сюда и приходят. Отключить
+  // можно пресетом «Выкл» или тумблером в настройках звука.
+  aiNoiseSuppression: true,
+  aiEngine: 'fastenhancer' as const,
+  aiModelSize: 'small' as const,
 };
 
 function clampNumber(value: any, min: number, max: number, fallback: number): number {
@@ -140,7 +164,11 @@ function mergeSettings(s: AudioFilterSettings | undefined): typeof DEFAULT_AUDIO
     noiseGateAttackMs: clampNumber(s.noiseGateAttackMs, 0, 500, d.noiseGateAttackMs),
     noiseGateReleaseMs: clampNumber(s.noiseGateReleaseMs, 0, 1000, d.noiseGateReleaseMs),
     makeupGainDb: clampNumber(s.makeupGainDb, -20, 20, d.makeupGainDb),
-    aiNoiseSuppression: s.aiNoiseSuppression === true,
+    // Отсутствующий флаг = дефолт (включено). Явный false — выключаем.
+    aiNoiseSuppression: s.aiNoiseSuppression !== false,
+    aiEngine: s.aiEngine === 'rnnoise' ? 'rnnoise' : d.aiEngine,
+    aiModelSize:
+      s.aiModelSize === 'tiny' || s.aiModelSize === 'base' ? s.aiModelSize : d.aiModelSize,
   };
 }
 
@@ -204,21 +232,49 @@ export async function createMicPipeline(
     }
   }
 
-  // Узлы цепочки -------------------------------------------------------
-  const source = ctx.createMediaStreamSource(rawStream);
-
-  // RNNoise (опционально, первая ступень). Загрузка асинхронна; если
-  // упала — просто остаёмся без AI. Узел вставляем между source и
-  // inputGain, и держим ссылку, чтобы корректно destroy() в финале.
+  // AI-ступень (опционально, самая первая) ------------------------------
+  //
+  // Порядок попыток: FastEnhancer → RNNoise → без AI. Каждая ступень
+  // грузится асинхронно и возвращает null при любой проблеме, поэтому
+  // деградация тихая: звонок состоится в любом случае, максимум без
+  // шумодава.
+  //
+  // Две ступени устроены по-разному, и это принципиально для схемы
+  // подключения:
+  //   * FastEnhancer отдаёт stream-in → stream-out (внутри у него свой
+  //     AudioWorkletNode + MediaStreamDestination), поэтому головой
+  //     остальной цепочки становится MediaStreamSource от ЕГО выхода.
+  //   * RNNoise отдаёт обычный AudioNode, который просто вставляется
+  //     между source и inputGain.
+  let feStage: import('./audioFastEnhancer').FastEnhancerStage | null = null;
   let rnnoiseNode: any = null;
+  let aiEngine: MicPipeline['aiEngine'] = 'off';
+
   if (s.aiNoiseSuppression) {
-    try {
-      const { createRnnoiseNode } = await import('./audioRnnoise');
-      rnnoiseNode = await createRnnoiseNode(ctx);
-    } catch (e) {
-      console.warn('RNNoise unavailable, falling back to plain pipeline:', e);
+    if (s.aiEngine === 'fastenhancer') {
+      try {
+        const { createFastEnhancerStage } = await import('./audioFastEnhancer');
+        feStage = await createFastEnhancerStage(ctx, rawStream, s.aiModelSize);
+        if (feStage) aiEngine = 'fastenhancer';
+      } catch (e) {
+        console.warn('FastEnhancer unavailable, trying RNNoise:', e);
+      }
+    }
+    // Резерв: либо явно выбран RNNoise, либо FastEnhancer не поднялся.
+    if (!feStage) {
+      try {
+        const { createRnnoiseNode } = await import('./audioRnnoise');
+        rnnoiseNode = await createRnnoiseNode(ctx);
+        if (rnnoiseNode) aiEngine = 'rnnoise';
+      } catch (e) {
+        console.warn('RNNoise unavailable, falling back to plain pipeline:', e);
+      }
     }
   }
+
+  // Узлы цепочки -------------------------------------------------------
+  // Голова цепочки: выход FastEnhancer'а, если он поднялся, иначе сырой мик.
+  const source = ctx.createMediaStreamSource(feStage ? feStage.outputStream : rawStream);
 
   const inputGain = ctx.createGain();
   inputGain.gain.value = s.inputVolume;
@@ -362,10 +418,11 @@ export async function createMicPipeline(
 
   const updateSettings: MicPipeline['updateSettings'] = (next) => {
     const merged = mergeSettings({ ...live.s, ...next });
-    // Внимание: aiNoiseSuppression тут НЕ перецепить — RNNoise-узел
-    // фиксируется в момент создания pipeline'а (нужен async-import
-    // WASM и другая sample-rate у контекста). Изменение этого флага
-    // вступит в силу при следующем запуске звонка / тесте микрофона.
+    // Внимание: AI-ступень (aiNoiseSuppression / aiEngine / aiModelSize)
+    // тут НЕ перецепить — она фиксируется в момент создания pipeline'а
+    // (нужен async-import WASM, регистрация AudioWorklet и контекст на
+    // 48 kHz). Вызывающий код должен сверяться с needsPipelineRebuild()
+    // и пересобирать цепочку, когда эти поля изменились.
     live.s = merged;
     // Аккуратно применяем — некоторые AudioParam требуют setValueAtTime.
     try {
@@ -398,6 +455,16 @@ export async function createMicPipeline(
       source.disconnect();
     } catch {
       /* */
+    }
+    if (feStage) {
+      // Освобождает WASM-память и внутренний AudioWorkletNode. Наш
+      // AudioContext ступень НЕ закрывает — он передан ей снаружи
+      // (см. audioFastEnhancer.ts, п.2 в шапке файла).
+      try {
+        feStage.destroy();
+      } catch {
+        /* */
+      }
     }
     if (rnnoiseNode) {
       try {
@@ -483,7 +550,33 @@ export async function createMicPipeline(
     analyser: finalAnalyser,
     destroy,
     updateSettings,
+    aiEngine,
   };
+}
+
+/**
+ * Нужно ли пересобирать пайплайн при переходе от одних настроек к другим.
+ *
+ * Большинство параметров (пороги, частоты, gain'ы) применяются на лету
+ * через updateSettings. Но AI-ступень фиксируется в момент создания:
+ * ей нужен async-import WASM, регистрация AudioWorklet и контекст ровно
+ * на 48 kHz. Поэтому смена движка, размера модели или самого флага
+ * шумодава требует полной пересборки цепочки.
+ *
+ * Вызывающий код (useCall / useGroupCall / тест микрофона) должен на
+ * true пересоздать pipeline и заменить трек в RTC через replaceTrack.
+ */
+export function needsPipelineRebuild(
+  prev: AudioFilterSettings | undefined,
+  next: AudioFilterSettings | undefined,
+): boolean {
+  const a = mergeSettings(prev);
+  const b = mergeSettings(next);
+  return (
+    a.aiNoiseSuppression !== b.aiNoiseSuppression ||
+    a.aiEngine !== b.aiEngine ||
+    a.aiModelSize !== b.aiModelSize
+  );
 }
 
 // =============================================================================
@@ -646,9 +739,10 @@ type PresetPayload = {
   noiseGateAttackMs: number;
   noiseGateReleaseMs: number;
   makeupGainDb: number;
-  // AI-шумодав. Включаем только в «Агрессивном» — RNNoise тащит +150 КБ
-  // WASM, ему нужен AudioWorklet и контекст на 48 kHz; для большинства
-  // юзеров это излишне.
+  // AI-шумодав. Включён и в «Стандарте», и в «Агрессивном» — это база
+  // современного голосового чата, а не опция для энтузиастов. Разница
+  // между пресетами теперь в классической части цепочки (gate/компрессор),
+  // а не в наличии нейросети. Выключается только пресетом «Выкл».
   aiNoiseSuppression: boolean;
 };
 
@@ -670,7 +764,7 @@ const STANDARD_PRESET: PresetPayload = {
   noiseGateAttackMs: 10,
   noiseGateReleaseMs: 80,
   makeupGainDb: 0,
-  aiNoiseSuppression: false,
+  aiNoiseSuppression: true,
 };
 
 // «Выкл» — полностью прозрачная цепочка. Юзер либо пользуется
@@ -694,16 +788,20 @@ const OFF_PRESET: PresetPayload = {
   aiNoiseSuppression: false,
 };
 
-// «Агрессивный» = RNNoise + жёсткий gate + сильный compressor.
-// Для шумных комнат / клавиатур / соседей за стеной. RNNoise сам
-// справляется с большинством шумов нейросетью; gate и compressor
-// оставлены на тот случай, если RNNoise не загрузился (offline / CSP /
-// старый браузер) — без них в этом сценарии было бы выключено всё.
-// HP режет ниже 150 Гц, компрессор давит сильнее (и компенсирует +3 дБ
-// makeup, иначе всё станет тише), gate закрывается раньше и быстрее.
+// «Агрессивный» = AI-шумодав + жёсткий gate + сильный compressor.
+// Для шумных комнат / клавиатур / соседей за стеной. Нейросеть сама
+// справляется с большинством шумов; gate и compressor оставлены на тот
+// случай, если AI-ступень не загрузилась (offline / CSP / старый
+// браузер) — без них в этом сценарии было бы выключено всё.
+//
+// HP: 120 Гц. Раньше здесь стояло 400 Гц, и это была главная причина,
+// почему «Агрессивный» звучал как телефонная трубка: основной тон
+// мужского голоса лежит на 85–180 Гц, женского — на 165–255 Гц, то есть
+// срез на 400 Гц выносил фундаментальную частоту целиком и оставлял одни
+// гармоники. 120 Гц глушит гул и вентилятор, но голос не трогает.
 const AGGRESSIVE_PRESET: PresetPayload = {
   highPassFilter: true,
-  highPassFrequency: 400,
+  highPassFrequency: 120,
   compressorEnabled: true,
   compressorThreshold: -28,
   compressorRatio: 6,
@@ -804,5 +902,7 @@ export function pickAudioFilterSettings(settings: any): AudioFilterSettings {
     noiseGateReleaseMs: settings.noiseGateReleaseMs,
     makeupGainDb: settings.makeupGainDb,
     aiNoiseSuppression: settings.aiNoiseSuppression,
+    aiEngine: settings.aiEngine,
+    aiModelSize: settings.aiModelSize,
   };
 }

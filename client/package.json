@@ -16,6 +16,7 @@
   "dependencies": {
     "@fontsource-variable/inter": "^5.2.8",
     "@sapphi-red/web-noise-suppressor": "^0.3.5",
+    "fastenhancer-web": "^0.1.1",
     "lucide-react": "^0.456.0",
     "motion": "^12.38.0",
     "react": "^18.3.1",

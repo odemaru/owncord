@@ -7,6 +7,12 @@ uploads/
 *.sqlite
 *.sqlite-journal
 .DS_Store
+
+# TLS-сертификаты для приватной сети (mkcert, см. deploy/LAN-HTTPS.md).
+# Внутри лежит ПРИВАТНЫЙ КЛЮЧ — коммитить нельзя ни при каких раскладах.
+certs/
+*.pem
+*.key
 .claude/
 # Trigger-токен для GitLab pipeline (см. scripts/trigger-pipeline.ps1).
 # Содержит секрет, дающий право пинать deploy на наш сервер.

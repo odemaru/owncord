@@ -174,16 +174,28 @@ router.get('/:peerId', authRequired, (req, res) => {
   const peerId = Number(req.params.peerId);
   if (!Number.isInteger(peerId)) return res.status(400).json({ error: 'bad peerId' });
   const me = req.user.id;
+  // Берём ПОСЛЕДНИЕ 500 сообщений, а не первые.
+  //
+  // Раньше здесь было `ORDER BY created_at ASC LIMIT 500`, что в переписке
+  // длиннее 500 сообщений отдавало самые старые — открыв такой чат, юзер
+  // видел переписку годовой давности и ни одного свежего сообщения.
+  // Сортируем по убыванию, режем лимитом, затем разворачиваем обратно
+  // в хронологический порядок, который ожидает UI.
+  //
+  // Тай-брейк по id обязателен: created_at пишется в миллисекундах, и
+  // сообщения, отправленные в одну миллисекунду, без него могли попасть
+  // в срез в произвольном порядке.
   const rows = db
     .prepare(
       `SELECT ${MSG_COLS}
        FROM messages
        WHERE (sender_id = ? AND receiver_id = ?)
           OR (sender_id = ? AND receiver_id = ?)
-       ORDER BY created_at ASC
+       ORDER BY created_at DESC, id DESC
        LIMIT 500`,
     )
-    .all(me, peerId, peerId, me);
+    .all(me, peerId, peerId, me)
+    .reverse();
   const messages = rows.map(rowToMessage);
   // Загружаем реакции для каждого сообщения
   for (const msg of messages) {
@@ -497,14 +509,24 @@ router.delete('/:id', authRequired, (req, res) => {
 
 // Добавить/удалить реакцию на личное сообщение
 router.post('/:id/reaction', authRequired, (req, res) => {
-  const { id } = req.params;
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'bad id' });
   const { emoji } = req.body;
   if (!emoji || typeof emoji !== 'string') return res.status(400).json({ error: 'invalid emoji' });
+  // Ограничиваем длину: поле идёт прямиком в БД и в бродкаст по сокетам,
+  // а на клиенте это одиночный эмодзи. Без лимита сюда можно положить
+  // мегабайтную строку и разослать её всем участникам чата.
+  if (emoji.length > 16) return res.status(400).json({ error: 'invalid emoji' });
 
   const msg = db
     .prepare('SELECT id, sender_id, receiver_id, group_id FROM messages WHERE id = ?')
     .get(id);
   if (!msg) return res.status(404).json({ error: 'message not found' });
+  // КРИТИЧНО: без этой проверки любой залогиненный юзер мог перебором id
+  // ставить реакции на сообщения в ЧУЖИХ личных переписках — и, за счёт
+  // emitMessage ниже, ещё и получать уведомление о доставке в чат, к
+  // которому не имеет отношения.
+  if (!canAccessRow(req.user.id, msg)) return res.status(403).json({ error: 'forbidden' });
   if (msg.group_id) return res.status(400).json({ error: 'use group reaction endpoint' });
   if (msg.sender_id === req.user.id)
     return res.status(400).json({ error: 'cannot react to own message' });
@@ -546,9 +568,15 @@ router.post('/:id/reaction', authRequired, (req, res) => {
 
 // Получить реакции на личное сообщение
 router.get('/:id/reactions', authRequired, (req, res) => {
-  const { id } = req.params;
-  const msg = db.prepare('SELECT id, group_id FROM messages WHERE id = ?').get(id);
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'bad id' });
+  const msg = db
+    .prepare('SELECT id, sender_id, receiver_id, group_id FROM messages WHERE id = ?')
+    .get(id);
   if (!msg) return res.status(404).json({ error: 'message not found' });
+  // Та же дыра, что и в POST: без проверки доступа перебором id можно
+  // вычитывать, кто и чем реагировал в чужих личных переписках.
+  if (!canAccessRow(req.user.id, msg)) return res.status(403).json({ error: 'forbidden' });
   if (msg.group_id) return res.status(400).json({ error: 'use group reaction endpoint' });
 
   const reactions = db

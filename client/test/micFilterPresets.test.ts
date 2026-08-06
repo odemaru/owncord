@@ -24,9 +24,9 @@ const FRESH_DEFAULTS = {
   noiseGateAttackMs: 10,
   noiseGateReleaseMs: 80,
   makeupGainDb: 0,
-  // RNNoise отключён в дефолтах (как и в STANDARD_PRESET) — AI-шумодав
-  // тащит +150 КБ WASM, поэтому включается только в «Агрессивном».
-  aiNoiseSuppression: false,
+  // AI-шумодав включён в дефолтах (как и в STANDARD_PRESET) — это база,
+  // а не опция. Выключается только пресетом «Выкл».
+  aiNoiseSuppression: true,
 };
 
 describe('micFilterPresets', () => {
@@ -49,21 +49,32 @@ describe('micFilterPresets', () => {
     expect(detectMicFilterPreset(agg)).toBe('aggressive');
   });
 
-  it('"aggressive" preset enables aiNoiseSuppression (RNNoise)', () => {
-    // Контракт UX-а: «Агрессивный» включает RNNoise. Если кто-то решит
-    // отключить AI в этом пресете — пусть сначала прочитает обоснование
-    // в audioProcessing.ts (RNNoise — главное, что отличает «агрессивный»
-    // от «стандарта»; без него остаётся только чуть жёстче gate, что
-    // не оправдывает отдельный пресет).
+  it('AI-шумодав включён везде, кроме пресета «Выкл»', () => {
+    // Контракт UX-а: нейросетевой шумодав — это база, а не опция для
+    // энтузиастов, поэтому он живёт и в «Стандарте», и в «Агрессивном».
+    // Единственный способ его выключить — осознанно выбрать «Выкл»
+    // (например, когда юзер уже гоняет звук через OBS/VoiceMeeter).
+    // Разница между «Стандартом» и «Агрессивным» теперь в классической
+    // части цепочки: срез HP, жёсткость gate и компрессора.
     // applyMicFilterPreset возвращает union (с fallback'ом на одиночный
     // ключ micFilterPreset); тут нам нужен полный payload — `as any`
     // устраняет узкое типизирование без жертвы рантайм-проверки.
     const agg = applyMicFilterPreset('aggressive') as any;
     expect(agg.aiNoiseSuppression).toBe(true);
     const std = applyMicFilterPreset('standard') as any;
-    expect(std.aiNoiseSuppression).toBe(false);
+    expect(std.aiNoiseSuppression).toBe(true);
     const off = applyMicFilterPreset('off') as any;
     expect(off.aiNoiseSuppression).toBe(false);
+  });
+
+  it('«Агрессивный» не срезает фундаментальную частоту голоса', () => {
+    // Регрессия: тут стояло 400 Гц, из-за чего пресет звучал как
+    // телефонная трубка — основной тон мужского голоса (85–180 Гц) и
+    // женского (165–255 Гц) вырезался целиком, оставались одни гармоники.
+    // Порог 160 Гц выбран как потолок: ниже него любой разумный HP
+    // оставляет мужской голос читаемым.
+    const agg = getMicFilterPreset('aggressive')!;
+    expect(agg.highPassFrequency).toBeLessThanOrEqual(160);
   });
 
   it('returns "custom" when even one number drifts', () => {

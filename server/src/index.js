@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import http from 'node:http';
+import https from 'node:https';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -107,7 +108,14 @@ app.get('/privacy', (_req, res) => {
 // Глобальный обработчик ошибок (multer/прочее) — возвращает JSON вместо HTML.
 app.use((err, _req, res, _next) => {
   console.error('[api-error]', err?.message || err);
-  const status = err?.status || err?.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+  // Осторожно с приоритетом операторов: `a || b === c ? x : y` разбирается
+  // как `(a || (b === c)) ? x : y`. Из-за этого прежняя версия отдавала 413
+  // на ЛЮБУЮ ошибку, у которой выставлен err.status — например, 400
+  // «expected image file» из normalizeUpload прилетал клиенту как
+  // «файл слишком большой». Разводим ветки явно.
+  let status = 400;
+  if (err?.code === 'LIMIT_FILE_SIZE') status = 413;
+  else if (Number.isInteger(err?.status)) status = err.status;
   res.status(status).json({ error: err?.message || 'bad request' });
 });
 
@@ -120,12 +128,67 @@ if (fs.existsSync(clientDist)) {
   });
 }
 
-const server = http.createServer(app);
+// --- HTTP / HTTPS ----------------------------------------------------------
+//
+// По умолчанию поднимаем обычный HTTP: за nginx/Caddy с Let's Encrypt TLS
+// терминируется выше, и дублировать его в Node незачем.
+//
+// Но есть сценарий, где обратного прокси нет и быть не может: сервер живёт
+// только внутри приватной сети (LAN, ZeroTier, Tailscale) и доступен по
+// голому IP. Публичный CA сертификат на 10.x.x.x не выдаст, а без HTTPS
+// браузер не отдаст ни микрофон, ни камеру, ни демонстрацию экрана:
+// getUserMedia/getDisplayMedia требуют secure context, и единственное
+// исключение из правила — localhost. То есть по http://10.150.20.1:3001
+// звонки физически не заработают, сколько ни правь настройки.
+//
+// Поэтому: если заданы TLS_CERT_FILE и TLS_KEY_FILE — слушаем HTTPS сами.
+// Сертификат для приватного IP удобно выпустить через mkcert (см.
+// deploy/LAN-HTTPS.md): он заводит локальный CA, и после установки этого
+// CA на клиентские устройства адрес становится полноценно доверенным —
+// работают и звонки, и service worker, и push, и установка PWA.
+const TLS_CERT_FILE = process.env.TLS_CERT_FILE;
+const TLS_KEY_FILE = process.env.TLS_KEY_FILE;
+const useTls = !!(TLS_CERT_FILE && TLS_KEY_FILE);
+
+let server;
+if (useTls) {
+  let creds;
+  try {
+    creds = {
+      cert: fs.readFileSync(TLS_CERT_FILE),
+      key: fs.readFileSync(TLS_KEY_FILE),
+    };
+  } catch (e) {
+    // Падаем громко: молча откатиться на HTTP — худший вариант. Юзер будет
+    // думать, что у него TLS, а микрофон «почему-то» не работает.
+    console.error(
+      `[owncord] не удалось прочитать TLS-сертификат (TLS_CERT_FILE=${TLS_CERT_FILE}, ` +
+        `TLS_KEY_FILE=${TLS_KEY_FILE}): ${e?.message || e}`,
+    );
+    process.exit(1);
+  }
+  server = https.createServer(creds, app);
+} else {
+  server = http.createServer(app);
+}
+
 const io = attachSocket(server);
 
 const PORT = Number(process.env.PORT || 3001);
-server.listen(PORT, () => {
-  console.log(`[owncord] listening on http://localhost:${PORT}`);
+// HOST=0.0.0.0 нужен, чтобы сервер был виден с других машин в приватной
+// сети. Дефолт оставляем прежним (слушаем все интерфейсы, как и раньше),
+// но даём возможность прибиться к одному адресу — например, только к
+// ZeroTier-интерфейсу, чтобы не торчать в домашний Wi-Fi.
+const HOST = process.env.HOST || '0.0.0.0';
+server.listen(PORT, HOST, () => {
+  const scheme = useTls ? 'https' : 'http';
+  console.log(`[owncord] listening on ${scheme}://localhost:${PORT} (bind ${HOST}:${PORT})`);
+  if (!useTls) {
+    console.log(
+      '[owncord] TLS выключен. По IP в локальной сети браузер НЕ даст доступ к микрофону ' +
+        'и камере — см. deploy/LAN-HTTPS.md',
+    );
+  }
 });
 
 // Фоновая чистка старых сообщений и файлов (см. RETENTION_DAYS в .env).

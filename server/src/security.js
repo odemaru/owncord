@@ -78,7 +78,19 @@ export function buildHelmet() {
           useDefaults: true,
           directives: {
             defaultSrc: ["'self'"],
-            scriptSrc: ["'self'"],
+            // 'wasm-unsafe-eval' — обязателен для WebAssembly.instantiate():
+            // на нём работает AI-шумодав (FastEnhancer/RNNoise). Без него
+            // Chrome блокирует компиляцию модуля, и шумодав молча
+            // деградирует в «без AI» прямо в проде, хотя в dev всё работало
+            // (в dev CSP выключён целиком — см. ветку ниже).
+            // Важно: это НЕ то же самое, что 'unsafe-eval' — обычный
+            // eval() и new Function() остаются запрещены.
+            //
+            // blob: — FastEnhancer грузит свой AudioWorklet-процессор как
+            // inline Blob URL, чтобы не требовать раздачи отдельного .js.
+            scriptSrc: ["'self'", "'wasm-unsafe-eval'", 'blob:'],
+            // AudioWorklet в Chromium проверяется по worker-src.
+            workerSrc: ["'self'", 'blob:'],
             styleSrc: ["'self'", "'unsafe-inline'"],
             imgSrc: ["'self'", 'data:', 'blob:'],
             mediaSrc: ["'self'", 'blob:', 'data:'],
