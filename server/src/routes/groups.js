@@ -527,14 +527,18 @@ router.get('/:id/messages', authRequired, (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) return res.status(400).json({ error: 'bad id' });
   if (!isMember(id, req.user.id)) return res.status(403).json({ error: 'not a member' });
+  // Последние 500, а не первые — см. подробный комментарий в
+  // routes/messages.js (GET /:peerId). Сортируем по убыванию, режем
+  // лимитом и разворачиваем обратно в хронологию для UI.
   const rows = db
     .prepare(
       `SELECT ${MSG_COLS} FROM messages
        WHERE group_id = ?
-       ORDER BY created_at ASC
+       ORDER BY created_at DESC, id DESC
        LIMIT 500`,
     )
-    .all(id);
+    .all(id)
+    .reverse();
   const messages = rows.map(rowToMessage);
   // Загружаем реакции для каждого сообщения
   for (const msg of messages) {

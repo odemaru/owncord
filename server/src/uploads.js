@@ -335,8 +335,14 @@ export function publicPathFor(absolutePath) {
 export function absolutePathFor(publicPath) {
   if (!publicPath || !publicPath.startsWith('/uploads/')) return null;
   const rel = publicPath.slice('/uploads/'.length);
-  // безопасность: не выходим за пределы UPLOADS_DIR
+  // Безопасность: не выходим за пределы UPLOADS_DIR.
+  //
+  // Голого startsWith(UPLOADS_DIR) здесь недостаточно — это классический
+  // обход по префиксу: путь `/uploads/../uploads-backup/secret` резолвится
+  // в «<...>/uploads-backup/secret», что честно начинается с «<...>/uploads»
+  // и проходило проверку. Сравниваем с разделителем на конце, плюс
+  // отдельно разрешаем сам каталог.
   const abs = path.resolve(UPLOADS_DIR, rel);
-  if (!abs.startsWith(UPLOADS_DIR)) return null;
+  if (abs !== UPLOADS_DIR && !abs.startsWith(UPLOADS_DIR + path.sep)) return null;
   return abs;
 }

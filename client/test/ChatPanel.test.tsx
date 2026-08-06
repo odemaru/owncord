@@ -88,7 +88,11 @@ describe('ChatPanel', () => {
     });
     fireEvent.click(screen.getByTitle('Отправить'));
 
-    expect(onSend).toHaveBeenCalledWith('hello');
+    // ChatPanel зовёт onSend(text, replyToId) — второй аргумент появился
+    // вместе с ответами на сообщения. Без цитаты он приходит как null,
+    // поэтому проверяем именно два аргумента: toHaveBeenCalledWith('hello')
+    // сверяет весь список целиком и на двухаргументном вызове краснеет.
+    expect(onSend).toHaveBeenCalledWith('hello', null);
     await waitFor(() => {
       expect(onTypingChange).toHaveBeenLastCalledWith(false);
     });
