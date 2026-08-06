@@ -532,9 +532,13 @@ export function useGroupCall({ socket, selfUser, settings, toast, sounds }) {
       setWithVideo(!!wantVideo);
 
       try {
+        // noiseSuppression выключаем, когда работает наша AI-ступень —
+        // иначе NS3 браузера обрабатывает сигнал ДО неё и модель получает
+        // уже искажённый вход. Подробнее — в utils/media.ts.
+        const aiOn = settings?.aiNoiseSuppression !== false;
         const audioConstraint = {
           echoCancellation: true,
-          noiseSuppression: true,
+          noiseSuppression: !aiOn,
           autoGainControl: true,
           ...(settings?.inputDeviceId && settings.inputDeviceId !== 'default'
             ? { deviceId: { exact: settings.inputDeviceId } }
@@ -553,7 +557,7 @@ export function useGroupCall({ socket, selfUser, settings, toast, sounds }) {
             rawStream = await navigator.mediaDevices.getUserMedia({
               audio: {
                 echoCancellation: true,
-                noiseSuppression: true,
+                noiseSuppression: !aiOn,
                 autoGainControl: true,
               },
               video: wantVideo ? { width: { ideal: 1280 }, height: { ideal: 720 } } : false,
@@ -719,6 +723,8 @@ export function useGroupCall({ socket, selfUser, settings, toast, sounds }) {
         const rawStream = await captureLocalMedia({
           wantVideo: false,
           audioDeviceId: settings?.inputDeviceId,
+          // Наш AI-шумодав активен → просим браузер не давить шум самому.
+          aiNoiseSuppression: settings?.aiNoiseSuppression !== false,
         });
         if (cancelled) {
           rawStream.getTracks().forEach((t) => {

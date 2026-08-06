@@ -247,12 +247,18 @@ export function AudioTab() {
     settings.makeupGainDb,
   ]);
 
-  // Если во время активного теста юзер меняет микрофон в выпадающем
-  // списке — рестартим тест на новом устройстве. updateSettings выше
-  // не помогает: deviceId фиксируется в getUserMedia при startMicTest,
-  // и без рестарта юзер продолжал бы слышать звук со старого мика, что
-  // полностью обесценивало бы тест («не слышу разницы между гарнитурой
-  // и встроенным микрофоном»).
+  // Полный рестарт теста, когда меняется то, что нельзя перецепить на лету.
+  //
+  //  * inputDeviceId — фиксируется в getUserMedia при startMicTest, и без
+  //    рестарта юзер продолжал бы слышать звук со старого мика, что
+  //    полностью обесценивало бы тест («не слышу разницы между гарнитурой
+  //    и встроенным микрофоном»).
+  //  * AI-шумодав (флаг / движок / размер модели) — ступень фиксируется в
+  //    момент сборки пайплайна (async-import WASM, регистрация
+  //    AudioWorklet, контекст ровно на 48 kHz), см. needsPipelineRebuild
+  //    в audioProcessing.ts. Плюс от этого флага зависит константа
+  //    noiseSuppression в самом getUserMedia — то есть пересоздавать надо
+  //    не только цепочку, но и исходный стрим.
   useEffect(() => {
     if (!isTestingMic) return undefined;
     // stopMicTest синхронно гасит pipeline + audio-loopback, после чего
@@ -270,7 +276,12 @@ export function AudioTab() {
       window.clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings.inputDeviceId]);
+  }, [
+    settings.inputDeviceId,
+    settings.aiNoiseSuppression,
+    settings.aiEngine,
+    settings.aiModelSize,
+  ]);
 
   const startMicTest = async () => {
     try {
@@ -280,9 +291,11 @@ export function AudioTab() {
             ? { exact: settings.inputDeviceId }
             : undefined,
         echoCancellation: true,
-        // noiseSuppression на уровне браузера всегда включаем — наш gate
-        // работает ПОВЕРХ него, отрезая то, что NS не догасил.
-        noiseSuppression: true,
+        // Браузерный noiseSuppression включаем ТОЛЬКО когда наша AI-ступень
+        // выключена. Иначе NS3 обрабатывает сигнал до нейросети и та слышит
+        // уже покоцанный вход — звук становится «подводным». Тест микрофона
+        // обязан повторять условия звонка 1-в-1, иначе он врёт.
+        noiseSuppression: settings?.aiNoiseSuppression === false,
         autoGainControl: true,
       };
       const rawStream = await navigator.mediaDevices.getUserMedia({
@@ -650,18 +663,37 @@ export function AudioTab() {
         </button>
         {advancedOpen && (
           <div className="space-y-3 pt-1">
-            {/* AI noise suppression (RNNoise) ---------------------- */}
-            {/* Эта ступень — первая в цепочке. WASM грузится lazy при
-                первом запуске пайплайна со включённым флагом, потом
-                кэшируется на всё приложение. Если загрузка падает,
-                createMicPipeline молча падает на цепочку без AI. */}
+            {/* AI-шумодав ------------------------------------------- */}
+            {/* Эта ступень — самая первая в цепочке, до High-pass'а.
+                WASM и веса грузятся lazy при первом запуске пайплайна и
+                дальше кэшируются на всё приложение. Порядок деградации:
+                FastEnhancer → RNNoise → цепочка без AI. Всё молча, звонок
+                состоится в любом случае. См. utils/audioFastEnhancer.ts. */}
             <ToggleRow
-              title="AI-шумодав (RNNoise)"
-              description="Нейросеть гасит клавиатуру, вентилятор, фон комнаты. ~150 КБ WASM, требует AudioWorklet (Chrome 80+/Firefox 76+/Safari 14.1+)."
+              title="AI-шумоподавление"
+              description="Нейросеть убирает клавиатуру, вентилятор, чужую речь и фон комнаты. Когда включено, собственный шумодав браузера отключается — иначе двойная обработка даёт «подводный» звук."
               icon={<Sparkles size={16} />}
-              checked={settings.aiNoiseSuppression === true}
+              checked={settings.aiNoiseSuppression !== false}
               onChange={(v) => updateAdvanced({ aiNoiseSuppression: v })}
             />
+            {settings.aiNoiseSuppression !== false && (
+              <div className="pl-7 space-y-1.5">
+                <label className="text-[11px] text-slate-500">Модель</label>
+                <select
+                  className="input"
+                  value={settings.aiModelSize || 'small'}
+                  onChange={(e) => updateAdvanced({ aiModelSize: e.target.value })}
+                >
+                  <option value="small">Максимальное качество (~780 КБ)</option>
+                  <option value="base">Сбалансированная (~390 КБ)</option>
+                  <option value="tiny">Лёгкая, для слабых ПК (~124 КБ)</option>
+                </select>
+                <p className="text-[11px] text-slate-500">
+                  Модель скачивается один раз при первом звонке. Чем крупнее — тем чище звук
+                  и выше нагрузка на процессор.
+                </p>
+              </div>
+            )}
 
             {/* High-pass --------------------------------------------- */}
             <ToggleRow

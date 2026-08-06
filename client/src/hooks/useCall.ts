@@ -544,6 +544,8 @@ export function useCall({ socket, selfUser, settings, toast, sounds }) {
       const rawStream = await captureLocalMedia({
         wantVideo,
         audioDeviceId: settings.inputDeviceId,
+        // Наш AI-шумодав активен → просим браузер не давить шум самому.
+        aiNoiseSuppression: settings?.aiNoiseSuppression !== false,
       });
 
       const rawMic = rawStream.getAudioTracks()[0] || null;
@@ -681,6 +683,7 @@ export function useCall({ socket, selfUser, settings, toast, sounds }) {
         const rawStream = await captureLocalMedia({
           wantVideo: false,
           audioDeviceId: settings.inputDeviceId,
+          aiNoiseSuppression: settings?.aiNoiseSuppression !== false,
         });
         if (cancelled) {
           rawStream.getTracks().forEach((t) => {

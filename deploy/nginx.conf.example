@@ -93,8 +93,17 @@ server {
 
   # Content-Security-Policy: что страница может загружать/выполнять.
   # Зеркало helmet'овского CSP (см. server/src/security.js).
-  #   - script-src 'self' — никаких inline-script'ов и eval.
-  #     Vite-production-bundle уже без них.
+  #   - script-src 'self' 'wasm-unsafe-eval' blob: — inline-script'ов и
+  #     обычного eval по-прежнему нет (Vite-production-bundle без них).
+  #     'wasm-unsafe-eval' разрешает только WebAssembly.instantiate —
+  #     на нём работает AI-шумодав микрофона (FastEnhancer/RNNoise).
+  #     blob: нужен, потому что шумодав грузит свой AudioWorklet-процессор
+  #     как inline Blob URL.
+  #     ВНИМАНИЕ: этот заголовок складывается с тем, что шлёт helmet
+  #     (server/src/security.js). Когда CSP приходит двумя заголовками,
+  #     браузер применяет ПЕРЕСЕЧЕНИЕ политик — то есть строчку ниже
+  #     обязательно держать в синхроне с helmet'ом, иначе более строгая
+  #     из двух молча зарежет шумодав в проде.
   #   - style-src 'self' 'unsafe-inline' — Tailwind/motion инлайнят
   #     стили через JS; без 'unsafe-inline' UI развалится.
   #   - img-src/media-src 'self' data: blob: — аватары, голосовые,
@@ -107,7 +116,7 @@ server {
   #     <object>/<embed>/iframe.
   #   - upgrade-insecure-requests — авто-апгрейд http://… → https://…
   #     внутри страницы.
-  add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: data:; font-src 'self' data:; connect-src 'self' wss: ws:; worker-src 'self' blob:; manifest-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests" always;
+  add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: data:; font-src 'self' data:; connect-src 'self' wss: ws:; worker-src 'self' blob:; manifest-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests" always;
 
   # Вариант А: nginx отдаёт фронт сам (быстрее, кешируется).
   # Если фронт собирается в client/dist и доступен по /var/www/owncord/dist,

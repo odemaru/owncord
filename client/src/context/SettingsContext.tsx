@@ -57,11 +57,20 @@ const DEFAULTS = {
   compressorRelease: 50, // спад, мс
   compressorKnee: 30, // мягкий перегиб, дБ
   makeupGainDb: 0, // добавочное усиление после компрессора, дБ
-  // RNNoise-шумодав. Включается только в пресете «Агрессивный»; тащит
-  // ~150 КБ WASM (lazy-load при первом запуске пайплайна) и узел
-  // AudioWorklet. Если что-то пойдёт не так с загрузкой — пайплайн
-  // автоматически fallback'нется на классическую цепочку без AI.
-  aiNoiseSuppression: false,
+  // AI-шумодав. Включён по умолчанию — это база современного голосового
+  // чата, а не опция для энтузиастов. Ступень грузится лениво при первом
+  // запуске пайплайна (WASM + веса вшиты в JS, отдельных файлов раздавать
+  // не надо). Если загрузка не удалась — пайплайн сам откатится на RNNoise,
+  // а затем на классическую цепочку без AI: звонок состоится в любом случае.
+  aiNoiseSuppression: true,
+  // Движок: 'fastenhancer' (ICASSP 2026, по умолчанию) или 'rnnoise' (2018).
+  // RNNoise легче по CPU, но заметно хуже давит нестационарный шум —
+  // чужую речь на фоне, клавиатуру, шаги.
+  aiEngine: 'fastenhancer',
+  // Размер модели FastEnhancer: 'tiny' | 'base' | 'small'.
+  // small — лучшее качество (~36% бюджета кадра), base/tiny — для слабых
+  // машин и мобилок.
+  aiModelSize: 'small',
   // Клавиатурные биндинги. Применяются ТОЛЬКО в десктоп-версии
   // (Electron'овский globalShortcut). На вебе значения сохраняются
   // в localStorage, но никем не считываются — UI вкладки «Биндинги»
@@ -92,14 +101,35 @@ function load() {
     if (!raw) return { ...DEFAULTS };
     const parsed = JSON.parse(raw);
     const merged = { ...DEFAULTS, ...parsed };
-    // Миграция: у существующих юзеров может быть сохранён micFilterPreset,
-    // но не быть aiNoiseSuppression (поле добавили позже). Авто-заполняем
-    // флаг по имени пресета — иначе UI покажет «Пользовательский» сразу
-    // после апгрейда, хотя по факту юзер на «Агрессивном».
-    if (parsed && parsed.aiNoiseSuppression === undefined) {
-      if (parsed.micFilterPreset === 'aggressive') merged.aiNoiseSuppression = true;
-      else merged.aiNoiseSuppression = false;
+    // Миграция AI-шумодава.
+    //
+    // Раньше он был выключен везде, кроме пресета «Агрессивный», и старые
+    // конфиги хранят aiNoiseSuppression: false вместе с micFilterPreset:
+    // 'standard'. Если просто оставить это как есть, юзер после апдейта
+    // не получит шумодав вообще и увидит «Пользовательский» в дропдауне
+    // (его сохранённые значения больше не совпадают со «Стандартом»).
+    //
+    // Поэтому: тем, кто НЕ выбирал «Выкл» осознанно и не крутил ползунки
+    // вручную, включаем AI. Пресеты 'off' и 'custom' не трогаем — там
+    // выбор юзера явный, и перебивать его нельзя.
+    if (parsed && typeof parsed === 'object') {
+      const preset = parsed.micFilterPreset;
+      if (parsed.aiNoiseSuppression === undefined) {
+        // Совсем старый конфиг (поля ещё не было).
+        merged.aiNoiseSuppression = preset !== 'off' && preset !== 'custom';
+      } else if (
+        parsed.aiNoiseSuppression === false &&
+        (preset === 'standard' || preset === undefined)
+      ) {
+        // Конфиг эпохи «AI только в Агрессивном»: false тут — не решение
+        // юзера, а прежний дефолт. Поднимаем до нового стандарта.
+        merged.aiNoiseSuppression = true;
+      }
     }
+    // Движок и размер модели появились позже — доливаем дефолты, если их
+    // нет в сохранённом конфиге.
+    if (!merged.aiEngine) merged.aiEngine = DEFAULTS.aiEngine;
+    if (!merged.aiModelSize) merged.aiModelSize = DEFAULTS.aiModelSize;
     // Дополняем поле keybinds недостающими ключами — иначе будущие
     // действия (PTT, фокус-окно, ...) не появятся у юзеров со старыми
     // сохранёнными настройками. ...DEFAULTS не делает deep-merge для
