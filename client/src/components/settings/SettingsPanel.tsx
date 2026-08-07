@@ -43,7 +43,10 @@ const ALL_TABS = [
   { id: 'password', label: 'Пароль', icon: Lock },
   { id: 'audio', label: 'Звук', icon: Headphones },
   { id: 'notifications', label: 'Уведомления', icon: Bell },
-  { id: 'keybinds', label: 'Горячие клавиши', icon: Keyboard, desktopOnly: true },
+  // Не desktopOnly: на вебе хоткеи тоже работают, пока вкладка в фокусе
+  // (см. utils/webHotkeys.ts). Глобально, поверх других приложений, —
+  // по-прежнему только в десктопе.
+  { id: 'keybinds', label: 'Горячие клавиши', icon: Keyboard },
   { id: 'app', label: 'Приложение', icon: AppWindow, desktopOnly: true },
   { id: 'privacy', label: 'Приватность', icon: ShieldCheck },
   { id: 'invites', label: 'Приглашения', icon: KeyRound, adminOnly: true },

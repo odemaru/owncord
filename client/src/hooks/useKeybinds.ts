@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { applyShortcuts, isDesktop } from '../utils/desktop';
 import type { Shortcuts, ShortcutAction } from '../utils/desktop';
+import { installWebHotkeys } from '../utils/webHotkeys';
 
 /**
  * useKeybinds — синхронизация настроек keybinds с десктоп-обёрткой.
@@ -24,10 +25,11 @@ import type { Shortcuts, ShortcutAction } from '../utils/desktop';
  * глобальной, и весь mousedown-обработчик переехал в main (см.
  * desktop/mouseHook.js).
  *
- * На вебе (window.electronAPI отсутствует) хук — no-op. Поле
- * settings.keybinds всё равно сохраняется в localStorage, но UI вкладки
- * «Горячие клавиши» прячется (см. SettingsPanel.desktopOnly), так что
- * пустые значения в браузере незаметны.
+ * На вебе Electron-пути нет, поэтому те же привязки обслуживает
+ * window-level listener из utils/webHotkeys.ts. Он диспатчит ТО ЖЕ
+ * событие 'owncord:shortcut', так что useCall и useGroupCall не знают о
+ * существовании двух реализаций. Разница только в охвате: в браузере
+ * хоткей работает, пока вкладка OwnCord в фокусе, в десктопе — всегда.
  *
  * Поле deps — плоский набор значений keybinds. Если добавляешь новое
  * действие, не забудь:
@@ -40,12 +42,20 @@ export function useKeybinds(keybinds: Partial<Record<ShortcutAction, string | nu
   const toggleMute = keybinds?.toggleMute ?? null;
   const toggleDeafen = keybinds?.toggleDeafen ?? null;
 
-  // Передаём ВСЮ карту, включая мышиные acc'ы — main сам разделит:
-  // клавиатурные пойдут в Electron globalShortcut, мышиные — в uIOhook.
-  // Никакой фильтрации тут не нужно.
+  // Десктоп: передаём ВСЮ карту, включая мышиные acc'ы — main сам
+  // разделит: клавиатурные пойдут в Electron globalShortcut, мышиные —
+  // в uIOhook. Никакой фильтрации тут не нужно.
   useEffect(() => {
     if (!isDesktop()) return;
     const map: Shortcuts = { toggleMute, toggleDeafen };
     void applyShortcuts(map);
+  }, [toggleMute, toggleDeafen]);
+
+  // Веб: свой обработчик на окне. Ставим только когда НЕ в Electron —
+  // иначе на десктопе хоткей отработал бы дважды (глобальный из main плюс
+  // этот), и тогл вернулся бы в исходное положение.
+  useEffect(() => {
+    if (isDesktop()) return undefined;
+    return installWebHotkeys({ toggleMute, toggleDeafen });
   }, [toggleMute, toggleDeafen]);
 }

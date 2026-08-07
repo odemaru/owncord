@@ -33,8 +33,10 @@ import {
   keyEventToAccelerator,
   mouseEventToAccelerator,
   formatAccelerator,
+  isDesktop,
   type ShortcutAction,
 } from '../../utils/desktop';
+import { setHotkeyCaptureMode } from '../../utils/webHotkeys';
 
 const KEYBIND_ACTIONS: { id: ShortcutAction; label: string; description: string; Icon: any }[] = [
   {
@@ -75,6 +77,12 @@ function KeybindRow({
   // → старый cleanup снимет хвосты, новый ран ничего не вешает).
   useEffect(() => {
     if (!recording) return undefined;
+
+    // Глушим боевые хоткеи на время записи. Иначе привязка мьюта на «M»
+    // тут же этот мьют и переключит: веб-обработчик висит на window в той
+    // же capture-фазе и зарегистрирован раньше нашего, так что сработал бы
+    // первым, и stopPropagation ниже уже ничего не изменил бы.
+    setHotkeyCaptureMode(true);
 
     const writeKeybind = (acc: string | null) => {
       update({
@@ -121,6 +129,10 @@ function KeybindRow({
     return () => {
       window.removeEventListener('keydown', onKey, { capture: true } as any);
       window.removeEventListener('mousedown', onMouse, { capture: true } as any);
+      // Снимаем блокировку в cleanup, а не рядом с setRecording(false):
+      // так она гарантированно снимется и при размонтировании панели
+      // настроек прямо в режиме записи (закрыли модалку на полпути).
+      setHotkeyCaptureMode(false);
     };
   }, [recording, action, settings.keybinds, update]);
 
@@ -181,10 +193,26 @@ export function KeybindsTab() {
     <section className="space-y-4">
       <div className="text-xs text-slate-400 leading-snug space-y-1.5">
         <div>
-          Хоткеи срабатывают глобально, даже когда окно OwnCord не в фокусе — и клавиатура, и
-          боковые кнопки мыши (Mouse&nbsp;4 / Mouse&nbsp;5 / СКМ). Формат Electron'а (
-          <code className="text-[11px]">Ctrl+Shift+M</code>, <code className="text-[11px]">F8</code>
-          , …). Если комбинация занята другим приложением — будет молча проигнорирована.
+          Поддерживаются и клавиатура, и боковые кнопки мыши (Mouse&nbsp;4 / Mouse&nbsp;5 / СКМ).
+          Примеры: <code className="text-[11px]">Ctrl+Shift+M</code>,{' '}
+          <code className="text-[11px]">F8</code>.
+        </div>
+        {isDesktop() ? (
+          <div>
+            Срабатывают глобально, даже когда окно OwnCord свёрнуто или не в фокусе. Если
+            комбинация занята другим приложением — будет молча проигнорирована.
+          </div>
+        ) : (
+          <div>
+            В браузере хоткеи работают, пока вкладка OwnCord активна — страница просто не видит
+            нажатия, ушедшие в другое окно. Чтобы мьютиться прямо из игры или поверх любого
+            приложения, нужна десктоп-версия. Комбинации, занятые самим браузером (например{' '}
+            <code className="text-[11px]">Ctrl+W</code>), лучше не назначать.
+          </div>
+        )}
+        <div>
+          Одиночные буквы без модификаторов брать можно — во время набора сообщения они не
+          сработают.
         </div>
       </div>
 

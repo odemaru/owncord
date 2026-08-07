@@ -234,7 +234,11 @@ function Tile({
         <button
           type="button"
           onClick={toggleFullscreen}
-          className="absolute top-2 right-2 z-20 btn-icon bg-black/60 hover:bg-black/80 text-white border border-white/10 backdrop-blur opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+          // На мыши кнопка проявляется по наведению, чтобы не засорять сетку.
+          // На тач-устройствах hover'а не существует, и без явного
+          // [@media(hover:none)] кнопка была бы там невидимой навсегда —
+          // с телефона развернуть чужую демонстрацию стало бы нечем.
+          className="absolute top-2 right-2 z-20 btn-icon bg-black/60 hover:bg-black/80 text-white border border-white/10 backdrop-blur opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity"
           style={{ width: 32, height: 32 }}
           title={isFs ? 'Выйти из полноэкранного режима' : 'Развернуть на весь экран'}
           aria-label={isFs ? 'Выйти из полноэкранного режима' : 'Полноэкранный режим'}
@@ -358,6 +362,7 @@ export default function GroupCallView({
           onClick={onTileClick}
           pinned={isPinned}
           pinnable
+          fullscreenable
           speaking={!muted && speaks(selfId)}
           className={opts.className}
         />
@@ -388,6 +393,7 @@ export default function GroupCallView({
         onContextMenu={onTileContextMenu}
         pinned={isPinned}
         pinnable
+        fullscreenable
         speaking={speaks(t.userId)}
         className={opts.className}
       />
