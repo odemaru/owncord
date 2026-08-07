@@ -632,15 +632,30 @@ export function createMicScreenMixer(opts: {
     };
   }
   const ctx: AudioContext = new Ctx({ latencyHint: 'interactive' });
-  // Best-effort resume. Если вызвали из не-user-gesture'а (например,
-  // из onended-обработчика), браузер может оставить ctx 'suspended' —
-  // но даже в этом случае MediaStreamDestination отдаёт реальный трек
-  // (в отличие от createMicPipeline, который подвержен 'silent track'-
-  // багу при создании ДО первого user gesture). Тут контекст всегда
-  // создаётся уже после клика по кнопке «Демонстрация со звуком».
-  ctx.resume().catch(() => {
-    /* */
-  });
+  // Контекст ОБЯЗАН перейти в 'running'. Прежний комментарий тут
+  // допускал, что 'suspended' не страшен и трек всё равно живой — это
+  // неверно: приостановленный контекст не рендерит граф, и на выходе
+  // MediaStreamDestination идёт тишина. А поскольку через этот микшер
+  // проходит не только звук экрана, но и голос, собеседник переставал
+  // слышать говорящего вообще, стоило включить демонстрацию со звуком.
+  //
+  // Гарантию даёт ключ autoplay-policy=no-user-gesture-required в
+  // desktop/main.js (в браузере активация обычно уже есть). Здесь —
+  // диагностика на случай, если он потеряется: молчаливое пропадание
+  // голоса искать крайне тяжело.
+  ctx.resume()
+    .then(() => {
+      if (ctx.state !== 'running') {
+        console.warn(
+          '[micScreenMixer] AudioContext state=' +
+            ctx.state +
+            ' — голос и звук экрана не пойдут собеседнику',
+        );
+      }
+    })
+    .catch((e) => {
+      console.warn('[micScreenMixer] ctx.resume() не удался:', e);
+    });
 
   const micSource = ctx.createMediaStreamSource(new MediaStream([opts.micTrack]));
   const screenSource = ctx.createMediaStreamSource(new MediaStream([opts.screenAudioTrack]));

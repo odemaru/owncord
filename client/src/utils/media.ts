@@ -144,15 +144,33 @@ export async function captureLocalMedia({
 // Пресеты для getDisplayMedia + setParameters на video sender'е.
 // max-bitrate подобран так, чтобы картинка оставалась читабельной
 // (текст не «разъезжался» при движении), но не забивал канал.
+// Битрейт у 60fps-вариантов выше не вдвое, а примерно в полтора раза:
+// соседние кадры при удвоенной частоте сильно похожи, и межкадровое
+// сжатие съедает часть разницы. Полное удвоение просто жгло бы канал без
+// выигрыша в качестве.
 export const SCREEN_PRESETS = {
   '480p': { width: 854, height: 480, frameRate: 30, maxBitrate: 1_500_000, label: '480p · 30fps' },
   '720p': { width: 1280, height: 720, frameRate: 30, maxBitrate: 3_000_000, label: '720p · 30fps' },
+  '720p60': {
+    width: 1280,
+    height: 720,
+    frameRate: 60,
+    maxBitrate: 4_500_000,
+    label: '720p · 60fps',
+  },
   '1080p': {
     width: 1920,
     height: 1080,
     frameRate: 30,
     maxBitrate: 6_000_000,
     label: '1080p · 30fps',
+  },
+  '1080p60': {
+    width: 1920,
+    height: 1080,
+    frameRate: 60,
+    maxBitrate: 9_000_000,
+    label: '1080p · 60fps',
   },
   '1440p': {
     width: 2560,
@@ -161,9 +179,24 @@ export const SCREEN_PRESETS = {
     maxBitrate: 12_000_000,
     label: '1440p · 30fps (2K)',
   },
+  '1440p60': {
+    width: 2560,
+    height: 1440,
+    frameRate: 60,
+    maxBitrate: 18_000_000,
+    label: '1440p · 60fps (2K)',
+  },
 };
 
-export const SCREEN_PRESET_KEYS = ['480p', '720p', '1080p', '1440p'];
+export const SCREEN_PRESET_KEYS = [
+  '480p',
+  '720p',
+  '720p60',
+  '1080p',
+  '1080p60',
+  '1440p',
+  '1440p60',
+];
 
 export function getScreenPreset(key) {
   return SCREEN_PRESETS[key] || SCREEN_PRESETS['720p'];
@@ -289,6 +322,20 @@ export async function captureDisplay(presetKey, includeAudio = false) {
         (display as any).windowAudioStripped = true;
       }
     }
+  }
+
+  // contentHint — подсказка кодировщику, чем жертвовать при сжатии.
+  // Без неё Chromium считает захват экрана статичным текстом и экономит
+  // на частоте кадров ради чёткости: 60fps-пресет отдавал бы фактические
+  // 20-30 кадров, и разницы с обычным режимом не было бы видно.
+  //
+  //   'motion' — беречь плавность, допускать мягкость картинки (игры,
+  //              видео, всё что движется). Ставим на 60fps-пресетах.
+  //   'detail' — беречь резкость, допускать проседание частоты (код,
+  //              документы, интерфейсы). Ставим на 30fps.
+  const vTrack = display.getVideoTracks()[0];
+  if (vTrack && 'contentHint' in vTrack) {
+    vTrack.contentHint = preset.frameRate >= 60 ? 'motion' : 'detail';
   }
 
   return display;
@@ -560,7 +607,17 @@ export async function applyVideoSenderQuality(sender, presetKey) {
       enc.maxFramerate = preset.frameRate;
     }
     if ('degradationPreference' in params) {
-      params.degradationPreference = 'maintain-resolution';
+      // Чем жертвовать, когда канала или процессора не хватает.
+      //
+      // Для 30fps-пресетов режем частоту и держим разрешение: их выбирают
+      // под текст и код, где важна читаемость, а дёрганость терпима.
+      //
+      // Для 60fps — наоборот. Раньше здесь безусловно стояло
+      // 'maintain-resolution', и это сводило бы 60fps на нет: при первой
+      // же нехватке канала WebRTC срезал бы именно частоту кадров, то
+      // есть ровно то, ради чего пресет и выбирают.
+      params.degradationPreference =
+        preset.frameRate >= 60 ? 'maintain-framerate' : 'maintain-resolution';
     }
     await sender.setParameters(params);
   } catch {
