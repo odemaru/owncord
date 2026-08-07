@@ -43,11 +43,15 @@ const DEFAULTS = {
   // юзеров на вебе с этим не сталкиваются; галочку покажем в Audio-табе
   // как «спасательный круг» при тишине у пира.
   audioFiltersEnabled: true,
-  noiseSuppression: true, // включить шумовые ворота (gate)
+  // Шумовые ворота выключены по умолчанию: их работу делает нейросеть,
+  // а сами они рубят начала фраз и короткие реплики (см. STANDARD_PRESET
+  // в utils/audioProcessing.ts). Включаются вручную или пресетом
+  // «Агрессивный».
+  noiseSuppression: false, // шумовые ворота (gate)
   noiseThreshold: -55, // порог ворот в дБ (-100..0)
-  noiseGateHoldMs: 200, // hangover после падения ниже порога, мс
-  noiseGateAttackMs: 10, // плавное открытие, мс (анти-щелчок)
-  noiseGateReleaseMs: 80, // плавное закрытие, мс
+  noiseGateHoldMs: 350, // hangover после падения ниже порога, мс
+  noiseGateAttackMs: 2, // плавное открытие, мс (анти-щелчок)
+  noiseGateReleaseMs: 200, // плавное закрытие, мс
   highPassFilter: true, // вырезать низкочастотный гул (вентилятор и т.п.)
   highPassFrequency: 100, // частота среза HP, Гц (20..400)
   compressorEnabled: true, // компрессор: выравнивает пики и тихие места
@@ -130,6 +134,27 @@ function load() {
     // нет в сохранённом конфиге.
     if (!merged.aiEngine) merged.aiEngine = DEFAULTS.aiEngine;
     if (!merged.aiModelSize) merged.aiModelSize = DEFAULTS.aiModelSize;
+
+    // Миграция шумовых ворот.
+    //
+    // Раньше они были включены в «Стандарте», и у всех в localStorage
+    // лежит noiseSuppression: true. Это ровно та настройка, из-за которой
+    // съедались начала фраз и короткие реплики: порог по громкости не
+    // отличает тихую речь от шума. Теперь эту работу делает нейросеть.
+    //
+    // Без миграции обновление ничего бы не изменило — сохранённое
+    // значение перебивает новый дефолт, и люди продолжили бы жаловаться
+    // на пропадающие слова. Как и выше, трогаем только тех, кто не
+    // настраивал звук сам: 'off' и 'custom' — осознанный выбор.
+    if (parsed && typeof parsed === 'object' && parsed.noiseSuppression === true) {
+      const preset = parsed.micFilterPreset;
+      if (preset === 'standard' || preset === undefined) {
+        merged.noiseSuppression = false;
+        merged.noiseGateHoldMs = DEFAULTS.noiseGateHoldMs;
+        merged.noiseGateAttackMs = DEFAULTS.noiseGateAttackMs;
+        merged.noiseGateReleaseMs = DEFAULTS.noiseGateReleaseMs;
+      }
+    }
     // Дополняем поле keybinds недостающими ключами — иначе будущие
     // действия (PTT, фокус-окно, ...) не появятся у юзеров со старыми
     // сохранёнными настройками. ...DEFAULTS не делает deep-merge для

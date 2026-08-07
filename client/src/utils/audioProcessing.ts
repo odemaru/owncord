@@ -118,11 +118,12 @@ export const DEFAULT_AUDIO_FILTERS: Required<
   compressorAttack: 5,
   compressorRelease: 50,
   compressorKnee: 30,
-  noiseGateEnabled: true,
+  // Ворота выключены — см. обоснование у STANDARD_PRESET ниже.
+  noiseGateEnabled: false,
   noiseGateThreshold: -55,
-  noiseGateHoldMs: 200,
-  noiseGateAttackMs: 10,
-  noiseGateReleaseMs: 80,
+  noiseGateHoldMs: 350,
+  noiseGateAttackMs: 2,
+  noiseGateReleaseMs: 200,
   makeupGainDb: 0,
   // AI-шумодав включён по умолчанию: это главное, что отличает звук
   // от «сырого микрофона», и ради него сюда и приходят. Отключить
@@ -347,14 +348,26 @@ export async function createMicPipeline(
 
   // RMS-детектор для ворот (rAF). Если ворота выключены — gainTarget=1 всегда.
   const buf = new Float32Array(gateAnalyser.fftSize);
-  let lastAboveTs = 0;
+  // Стартуем «открытыми». При lastAboveTs=0 первая же проверка видела
+  // разницу в миллионы миллисекунд, считала ворота закрытыми, и первое
+  // слово после входа в звонок съедалось целиком.
+  let lastAboveTs = performance.now();
   let rafId = 0;
   let cancelled = false;
 
   const tick = () => {
     if (cancelled) return;
     const cs = live.s;
-    if (cs.noiseGateEnabled) {
+    // Окно свёрнуто или вкладка в фоне — requestAnimationFrame встаёт.
+    // Детектор при этом замирает в последнем состоянии, и если он замер
+    // закрытым, человека не слышно ВООБЩЕ, пока он не вернёт окно в
+    // фокус. Симптом со стороны: «говорит, а звука ноль».
+    //
+    // В фоне гейтить нечем и незачем — держим ворота открытыми, шум
+    // всё равно снимает нейросеть. Проверяем на каждом тике, потому что
+    // последний тик перед заморозкой должен оставить gain=1.
+    const hidden = typeof document !== 'undefined' && document.hidden;
+    if (cs.noiseGateEnabled && !hidden) {
       gateAnalyser.getFloatTimeDomainData(buf as any);
       let sum = 0;
       for (let i = 0; i < buf.length; i += 1) sum += buf[i] * buf[i];
@@ -394,6 +407,27 @@ export async function createMicPipeline(
     rafId = requestAnimationFrame(tick);
   };
   rafId = requestAnimationFrame(tick);
+
+  // Проверки внутри tick недостаточно: к моменту, когда окно скрыли, rAF
+  // уже мог перестать вызываться, и ворота остались бы закрытыми
+  // навсегда. Открываем их явно по событию — оно приходит независимо от
+  // кадров отрисовки.
+  const onVisibility = () => {
+    if (!document.hidden) {
+      // Вернулись — не даём воротам захлопнуться на первом же слове.
+      lastAboveTs = performance.now();
+      return;
+    }
+    try {
+      gateGain.gain.cancelScheduledValues(ctx.currentTime);
+      gateGain.gain.setValueAtTime(1, ctx.currentTime);
+    } catch {
+      /* */
+    }
+  };
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', onVisibility);
+  }
 
   const outputStream = destination.stream;
   // Берём ссылку на трек один раз — она стабильна.
@@ -451,6 +485,9 @@ export async function createMicPipeline(
   const destroy: MicPipeline['destroy'] = () => {
     cancelled = true;
     cancelAnimationFrame(rafId);
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', onVisibility);
+    }
     try {
       source.disconnect();
     } catch {
@@ -773,11 +810,23 @@ const STANDARD_PRESET: PresetPayload = {
   compressorAttack: 5,
   compressorRelease: 50,
   compressorKnee: 30,
-  noiseSuppression: true,
+  // Шумовые ворота ВЫКЛЮЧЕНЫ. Их работу теперь делает нейросеть, причём
+  // без побочного эффекта: ворота — это грубый порог по громкости, они
+  // не отличают тихую речь от шума и рубят начала фраз, концы слов и
+  // короткие реплики целиком. Именно на это жаловались все — «говорит,
+  // а половина слов не доходит».
+  //
+  // Оставить их «на всякий случай» нельзя: две системы подавления в
+  // цепочке дают ровно ту потерю слогов, ради устранения которой всё и
+  // затевалось. Кому нужен именно порог (очень шумная комната, AI не
+  // тянет по процессору) — включает вручную или берёт «Агрессивный».
+  noiseSuppression: false,
   noiseThreshold: -55,
-  noiseGateHoldMs: 200,
-  noiseGateAttackMs: 10,
-  noiseGateReleaseMs: 80,
+  // Атака 2 мс вместо 10: даже когда ворота включают вручную, они не
+  // должны срезать атаку первого слога.
+  noiseGateHoldMs: 350,
+  noiseGateAttackMs: 2,
+  noiseGateReleaseMs: 200,
   makeupGainDb: 0,
   aiNoiseSuppression: true,
 };
@@ -796,9 +845,9 @@ const OFF_PRESET: PresetPayload = {
   compressorKnee: 30,
   noiseSuppression: false,
   noiseThreshold: -55,
-  noiseGateHoldMs: 200,
-  noiseGateAttackMs: 10,
-  noiseGateReleaseMs: 80,
+  noiseGateHoldMs: 350,
+  noiseGateAttackMs: 2,
+  noiseGateReleaseMs: 200,
   makeupGainDb: 0,
   aiNoiseSuppression: false,
 };
@@ -823,11 +872,14 @@ const AGGRESSIVE_PRESET: PresetPayload = {
   compressorAttack: 3,
   compressorRelease: 60,
   compressorKnee: 24,
+  // Ворота здесь остаются — это и отличает «Агрессивный». Но пороги
+  // смягчены: −45 дБ отсекал тихую речь наравне с шумом, а удержание
+  // 150 мс захлопывало их между словами в обычном темпе разговора.
   noiseSuppression: true,
-  noiseThreshold: -45,
-  noiseGateHoldMs: 150,
-  noiseGateAttackMs: 5,
-  noiseGateReleaseMs: 60,
+  noiseThreshold: -58,
+  noiseGateHoldMs: 400,
+  noiseGateAttackMs: 2,
+  noiseGateReleaseMs: 250,
   makeupGainDb: 0,
   aiNoiseSuppression: true,
 };
