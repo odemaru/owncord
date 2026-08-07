@@ -290,7 +290,11 @@ export default function SettingsPanel({ open, onClose }: { open: boolean; onClos
                 {tab === 'password' && <PasswordTab />}
                 {tab === 'audio' && <AudioTab />}
                 {tab === 'notifications' && <NotificationsTab />}
-                {tab === 'keybinds' && desktop && <KeybindsTab />}
+                {/* Без гейта по desktop: хоткеи работают и в браузере,
+                    пока вкладка в фокусе (см. utils/webHotkeys.ts). Гейт
+                    тут держался парой к desktopOnly в ALL_TABS, и когда
+                    тот сняли — вкладка стала открываться пустой. */}
+                {tab === 'keybinds' && <KeybindsTab />}
                 {tab === 'app' && desktop && <AppTab />}
                 {tab === 'privacy' && <PrivacyTab />}
                 {tab === 'invites' && isAdmin && <InvitesTab />}
