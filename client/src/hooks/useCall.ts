@@ -14,7 +14,7 @@ import {
   createMicScreenMixer,
   type MicScreenMixer,
 } from '../utils/audioProcessing';
-import { onShortcutEvent, isDesktop } from '../utils/desktop';
+import { onShortcutEvent } from '../utils/desktop';
 import { startRtcDiag, buildRtcConfig } from '../utils/rtcDiag';
 
 /**
@@ -552,21 +552,27 @@ export function useCall({ socket, selfUser, settings, toast, sounds }) {
       const videoTrack = rawStream.getVideoTracks()[0] || null;
 
       let micTrack = rawMic;
-      // В Electron-десктопе всегда обходим AudioContext-pipeline для
-      // RTC-sender'а: даже если ctx в 'running'-state, RTCRtpSender
-      // энкодит трек от MediaStreamDestination в тишину (известный
-      // квикс Chromium-в-Electron, см. utils/media.ts:86 — эту же
-      // проблему уже ловили в прошлом). Локальный тест микро через
-      // тот же pipeline работает, потому что он играет outputStream
-      // через <audio>, минуя RTP-конвейер. На вебе же RTC корректно
-      // обрабатывает такие треки, поэтому pipeline остаётся включённым
-      // (его убирает только тогл «Применять фильтры микрофона»).
-      // Цена: в десктопе кастомные OBS-style фильтры (HighPass /
-      // Compressor / Gate / MakeupGain) не применяются — звук идёт
-      // сырой, но с нативной обработкой Chromium (echoCancellation /
-      // noiseSuppression / autoGainControl), которая по качеству
-      // близка к NS3 от Google и для голосового чата более чем хватает.
-      const wantPipeline = rawMic && settings?.audioFiltersEnabled !== false && !isDesktop();
+      // Раньше здесь стояло `&& !isDesktop()`: в Electron pipeline
+      // обходился целиком, потому что RTCRtpSender якобы кодировал трек
+      // от MediaStreamDestination в тишину. Вместе с фильтрами это
+      // выключало и AI-шумодав — в десктопе его просто не было.
+      //
+      // Гипотеза проверена замерами, см. tools/rtc-audio-probe. Петля
+      // RTCPeerConnection с реальным микрофоном через Web Audio проходит
+      // и на Windows, и на macOS: звук доходит до приёмника, уровень на
+      // входе энкодера ненулевой. Баг был в Chromium и починен в патчах —
+      // у автора стоял Electron 42.0.1, сейчас 42.8.1 с Chrome 148.
+      //
+      // Правдоподобно и то, что диагноз изначально был ошибочным:
+      // inbound-rtp.audioLevel показывает ноль при приглушённом
+      // приёмнике, хотя звук идёт. На этом легко решить, что «пир слышит
+      // тишину».
+      //
+      // Если у кого-то всё же всплывёт немой трек, страховка на месте:
+      // ниже стоит watchdog на состояние AudioContext, а у пользователя
+      // есть тогл «Применять фильтры микрофона» — он возвращает сырой
+      // трек из getUserMedia одним кликом.
+      const wantPipeline = rawMic && settings?.audioFiltersEnabled !== false;
       if (wantPipeline) {
         try {
           const pipeline = await createMicPipeline(
@@ -702,11 +708,11 @@ export function useCall({ socket, selfUser, settings, toast, sounds }) {
         // нажатый mute «отвалится» в момент свопа.
         const wasEnabled = micTrackRef.current?.enabled ?? true;
 
-        // 2) Pipeline (web only). На десктопе всегда обходим — см. подробный
+        // 2) Pipeline. Гейта по десктопу больше нет — см. подробный
         //    комментарий в getLocalMedia выше.
         let newProcessedMic: MediaStreamTrack = newRawMic;
         let newPipeline: any = null;
-        const wantPipeline = settings?.audioFiltersEnabled !== false && !isDesktop();
+        const wantPipeline = settings?.audioFiltersEnabled !== false;
         if (wantPipeline) {
           try {
             const pipeline = await createMicPipeline(

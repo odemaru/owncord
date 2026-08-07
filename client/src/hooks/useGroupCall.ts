@@ -13,7 +13,7 @@ import {
   createMicScreenMixer,
   type MicScreenMixer,
 } from '../utils/audioProcessing';
-import { onShortcutEvent, isDesktop } from '../utils/desktop';
+import { onShortcutEvent } from '../utils/desktop';
 import { startRtcDiag, buildRtcConfig } from '../utils/rtcDiag';
 import { useSpeakingDetector } from './useSpeakingDetector';
 
@@ -575,16 +575,14 @@ export function useGroupCall({ socket, selfUser, settings, toast, sounds }) {
         // processed-трек; raw-mic живёт внутри pipeline и завершится в
         // pipeline.destroy().
         //
-        // audioFiltersEnabled === false — глобальный bypass pipeline'а
-        // для Electron-десктопа (см. useCall.ts/SettingsContext: там же
-        // описание бага с suspended AudioContext).
+        // audioFiltersEnabled === false — ручной bypass pipeline'а,
+        // «спасательный круг» на случай проблем со звуком у пира.
         let processedMic = rawMic;
-        // См. подробный комментарий в useCall.ts (там же логика). Кратко:
-        // в Electron-десктопе RTCRtpSender энкодит трек от
-        // MediaStreamDestination в тишину, даже если AudioContext running.
-        // Поэтому в RTC всегда уходит сырой mic из getUserMedia. Web
-        // остаётся без изменений.
-        const wantPipeline = rawMic && settings?.audioFiltersEnabled !== false && !isDesktop();
+        // Гейт по !isDesktop() снят: проверка на реальном железе (Windows
+        // и macOS, Electron 42.8.1) показала, что путь mic -> Web Audio ->
+        // MediaStreamDestination -> RTC работает. Обоснование и замеры —
+        // в комментарии useCall.ts и в tools/rtc-audio-probe.
+        const wantPipeline = rawMic && settings?.audioFiltersEnabled !== false;
         if (wantPipeline) {
           try {
             const pipeline = await createMicPipeline(
@@ -741,10 +739,10 @@ export function useGroupCall({ socket, selfUser, settings, toast, sounds }) {
 
         const wasEnabled = audioTrackRef.current?.enabled ?? true;
 
-        // 2) Pipeline (web only, см. подробный комментарий в join()).
+        // 2) Pipeline (гейта по десктопу больше нет, см. join()).
         let newProcessedMic: MediaStreamTrack = newRawMic;
         let newPipeline: any = null;
-        const wantPipeline = settings?.audioFiltersEnabled !== false && !isDesktop();
+        const wantPipeline = settings?.audioFiltersEnabled !== false;
         if (wantPipeline) {
           try {
             const pipeline = await createMicPipeline(

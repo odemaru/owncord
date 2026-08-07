@@ -89,6 +89,15 @@ export function createPlaceholderAudioTrack() {
 // жизнь в suspended-состоянии после async-цепочки accept(): пир получал
 // трек, но без сэмплов. Теперь трек идёт сырым из getUserMedia.
 //
+// ВАЖНО про этот абзац: на него ссылались как на доказательство того, что
+// в Electron трек от MediaStreamDestination вообще не доходит до пира, и
+// на этом основании в десктопе отключили весь микрофонный пайплайн вместе
+// с шумодавом. Утверждение шире, чем факт. Проблема была в suspended-
+// контексте, а не в MediaStreamDestination как таковом: замеры на Windows
+// и macOS (Electron 42.8.1, см. tools/rtc-audio-probe) показывают, что
+// путь mic -> Web Audio -> dest -> RTC работает. Пайплайн включён обратно
+// везде; от suspended-контекста защищает watchdog в useCall/useGroupCall.
+//
 // Если сохранённый deviceId больше не существует (другая машина,
 // другой профиль браузера), Chrome бросает OverconstrainedError —
 // отлавливаем и fallback'имся на «default»-источник, иначе юзер будет
