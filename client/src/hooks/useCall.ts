@@ -592,6 +592,12 @@ export function useCall({ socket, selfUser, settings, toast, sounds }) {
               pipeline.context.state,
               ') — fallback на сырой mic-трек',
             );
+            // Молчать тут нельзя: снаружи это выглядит как «шумодав просто
+            // не работает в звонках», и человек идёт искать причину в
+            // настройки, где всё включено. Сообщаем прямо.
+            toast?.error?.(
+              'Обработка микрофона не запустилась — идёт сырой звук без шумодава',
+            );
             try {
               pipeline.destroy();
             } catch {
@@ -601,12 +607,18 @@ export function useCall({ socket, selfUser, settings, toast, sounds }) {
           } else {
             micPipelineRef.current = pipeline;
             micTrack = pipeline.outputTrack;
+            // Ступень могла не подняться (не загрузился WASM, нет
+            // AudioWorklet) — цепочка при этом работает, но без нейросети.
+            if (pipeline.aiEngine === 'off' && settings?.aiNoiseSuppression !== false) {
+              toast?.error?.('AI-шумодав не загрузился — фильтры работают без нейросети');
+            }
           }
         } catch (e) {
           // Fallback: если что-то сломалось при сборке pipeline (ноды/ctx),
           // отдаём сырой трек, чтобы звонок всё-таки прошёл. Это лучше,
           // чем «немой» вызов без диагностики.
           console.warn('Mic pipeline failed, falling back to raw track:', e);
+          toast?.error?.('Не удалось собрать обработку микрофона — идёт сырой звук');
           micTrack = rawMic;
         }
       }

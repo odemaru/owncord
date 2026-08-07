@@ -599,6 +599,11 @@ export function useGroupCall({ socket, selfUser, settings, toast, sounds }) {
                 pipeline.context.state,
                 ') — fallback на сырой mic-трек',
               );
+              // См. useCall: молчаливый откат неотличим от «шумодав не
+              // работает», поэтому говорим вслух.
+              toast?.error?.(
+                'Обработка микрофона не запустилась — идёт сырой звук без шумодава',
+              );
               try {
                 pipeline.destroy();
               } catch {
@@ -608,9 +613,13 @@ export function useGroupCall({ socket, selfUser, settings, toast, sounds }) {
             } else {
               micPipelineRef.current = pipeline;
               processedMic = pipeline.outputTrack;
+              if (pipeline.aiEngine === 'off' && settings?.aiNoiseSuppression !== false) {
+                toast?.error?.('AI-шумодав не загрузился — фильтры работают без нейросети');
+              }
             }
           } catch (e) {
             console.warn('Mic pipeline failed, falling back to raw track:', e);
+            toast?.error?.('Не удалось собрать обработку микрофона — идёт сырой звук');
             processedMic = rawMic;
           }
         }

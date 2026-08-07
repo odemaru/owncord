@@ -54,14 +54,6 @@
       "**/node_modules/uiohook-napi/**",
       "**/node_modules/application-loopback/bin/**"
     ],
-    "publish": [
-      {
-        "provider": "generic",
-        "url": "https://owncord.patgen.ru/updates/",
-        "channel": "latest",
-        "useMultipleRangeRequest": true
-      }
-    ],
     "win": {
       "target": [
         "nsis"

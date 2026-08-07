@@ -67,6 +67,11 @@ export function AudioTab() {
   // gateOpen — true когда noise gate сейчас пропускает звук (для индикатора).
   const [micLevel, setMicLevel] = useState({ percent: 0, db: -100, gateOpen: false });
   const [isTestingMic, setIsTestingMic] = useState(false);
+  // Какая AI-ступень реально поднялась в тесте. Не то же самое, что
+  // выбрано в настройках: движок мог не загрузиться и откатиться на
+  // резерв. Без этого «работает ли шумодав» проверялось только по
+  // консоли, что для обычного пользователя не вариант.
+  const [testEngine, setTestEngine] = useState<'fastenhancer' | 'rnnoise' | 'off' | null>(null);
   const [isTestingSpeaker, setIsTestingSpeaker] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
@@ -281,6 +286,10 @@ export function AudioTab() {
     settings.aiNoiseSuppression,
     settings.aiEngine,
     settings.aiModelSize,
+    // Тумблер решает, собирается ли цепочка вообще, а не какие у неё
+    // параметры. updateSettings такое не переключает — нужен рестарт,
+    // иначе тест продолжит играть прежний вариант и снова соврёт.
+    settings.audioFiltersEnabled,
   ]);
 
   const startMicTest = async () => {
@@ -303,15 +312,27 @@ export function AudioTab() {
       });
       // Тот же createMicPipeline, что в реальном звонке (см. useCall/useGroupCall).
       // Это гарантирует: что юзер слышит в тесте — то и услышит собеседник.
-      const pipeline = await createMicPipeline(rawStream, pickAudioFilterSettings(settings));
+      //
+      // ВАЖНО про audioFiltersEnabled. Раньше тест собирал цепочку всегда,
+      // игнорируя этот тумблер, а звонок его проверяет и при выключенном
+      // отдаёт сырой микрофон. Получался тест, который врёт ровно в том,
+      // ради чего существует: в нём шумодав слышно, в звонке его нет, и
+      // причина неочевидна. Теперь тест ведёт себя как звонок.
+      const filtersOn = settings?.audioFiltersEnabled !== false;
+      const pipeline = filtersOn
+        ? await createMicPipeline(rawStream, pickAudioFilterSettings(settings))
+        : null;
       pipelineRef.current = pipeline;
+      setTestEngine(pipeline ? pipeline.aiEngine : 'off');
 
       // Loopback: HTMLAudioElement с outputStream pipeline'а. По умолчанию
       // звук пойдёт в выбранное юзером устройство вывода (см. setSinkId).
       const audioEl = document.createElement('audio');
       audioEl.autoplay = true;
       (audioEl as any).playsInline = true;
-      audioEl.srcObject = pipeline.outputStream;
+      // Без цепочки слушаем сырой поток — ровно то, что в этом случае
+      // уйдёт собеседнику.
+      audioEl.srcObject = pipeline ? pipeline.outputStream : rawStream;
       // Делаем тише, чтобы не вызвать обратную связь с открытыми колонками.
       audioEl.volume = 0.6;
       if (canPickOutput && settings.outputDeviceId && settings.outputDeviceId !== 'default') {
@@ -358,6 +379,7 @@ export function AudioTab() {
       loopbackAudioRef.current = null;
     }
     setMicLevel({ percent: 0, db: -100, gateOpen: false });
+    setTestEngine(null);
     setIsTestingMic(false);
   };
 
@@ -558,6 +580,33 @@ export function AudioTab() {
             </span>
           )}
         </div>
+
+        {/* Что реально работает в тракте. До этого узнать было можно
+            только из консоли браузера — для обычного пользователя это
+            недоступно, и «шумодав не работает» превращалось в гадание. */}
+        {isTestingMic && (
+          <div className="text-[11px]">
+            {settings.audioFiltersEnabled === false ? (
+              <span className="text-amber-400">
+                Фильтры микрофона выключены — идёт сырой звук. Тот же звук услышит собеседник.
+              </span>
+            ) : testEngine === 'fastenhancer' ? (
+              <span className="text-emerald-400">
+                AI-шумодав работает: FastEnhancer, модель «{settings.aiModelSize || 'small'}»
+              </span>
+            ) : testEngine === 'rnnoise' ? (
+              <span className="text-amber-400">
+                Работает резервный шумодав RNNoise — FastEnhancer не загрузился
+              </span>
+            ) : testEngine === 'off' ? (
+              <span className="text-amber-400">
+                {settings.aiNoiseSuppression === false
+                  ? 'AI-шумодав отключён в настройках, работают только обычные фильтры'
+                  : 'AI-шумодав не загрузился, работают только обычные фильтры'}
+              </span>
+            ) : null}
+          </div>
+        )}
 
         <div className="text-[11px] text-slate-500">
           Смена микрофона применится к следующему звонку.

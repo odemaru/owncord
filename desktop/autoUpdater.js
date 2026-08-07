@@ -19,6 +19,8 @@
 //   - Не блокируем UI на проверку. Если сервер недоступен — тихо
 //     логируем и пробуем в следующий раз.
 
+const fs = require('node:fs');
+const path = require('node:path');
 const { autoUpdater } = require('electron-updater');
 const log = require('electron-log');
 
@@ -143,12 +145,39 @@ function setup(window, { app, ipcMain }) {
   // кладётся только в asar). НО IPC-стабы регистрируем — иначе renderer
   // ловит "No handler registered for 'update:check'" каждый раз, когда
   // ScreenQualityModal/SettingsPanel дёргают checkForUpdates() при mount.
-  if (!app.isPackaged) {
+  // Апдейтер не запускается в двух случаях:
+  //
+  //  1. Приложение не упаковано (dev) — app-update.yml кладётся только
+  //     при packaging, и electron-updater без него падает.
+  //  2. Канал обновлений не настроен, то есть app-update.yml нет и в
+  //     собранном виде. Так происходит у форков, которые не раздают
+  //     собственные сборки: в апстриме publish указывает на сервер
+  //     автора, и оставлять его нельзя — иначе пользователям форка
+  //     прилетали бы бинарники с чужого сервера, а сопровождающий форка
+  //     не контролировал бы, что именно им приходит. Убрали publish —
+  //     апдейтер молча выключается, вместо того чтобы каждые несколько
+  //     секунд писать в лог, что app-update.yml не найден.
+  //
+  // В обоих случаях IPC-стабы регистрируем: без них renderer ловит
+  // "No handler registered for 'update:check'" при каждом монтировании
+  // настроек.
+  const feedConfigured =
+    app.isPackaged &&
+    (() => {
+      try {
+        return fs.existsSync(path.join(process.resourcesPath, 'app-update.yml'));
+      } catch {
+        return false;
+      }
+    })();
+
+  if (!feedConfigured) {
     setupDone = true;
-    ipcMain.handle('update:check', () => ({
-      ok: false,
-      error: 'Auto-update недоступен в dev-режиме',
-    }));
+    const reason = app.isPackaged
+      ? 'Автообновление не настроено для этой сборки'
+      : 'Auto-update недоступен в dev-режиме';
+    log.info('[updater] выключен: ' + reason);
+    ipcMain.handle('update:check', () => ({ ok: false, error: reason }));
     ipcMain.handle('update:install', () => false);
     ipcMain.handle('update:get-state', () => null);
     return;
