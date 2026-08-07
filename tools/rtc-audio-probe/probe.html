@@ -1,0 +1,237 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>OwnCord — диагностика аудио-тракта</title>
+    <style>
+      body {
+        font: 13px/1.5 -apple-system, Segoe UI, Roboto, sans-serif;
+        background: #0b0d10;
+        color: #e6edf3;
+        margin: 0;
+        padding: 20px;
+      }
+      h1 {
+        font-size: 15px;
+        margin: 0 0 4px;
+      }
+      .sub {
+        color: #8b949e;
+        margin-bottom: 16px;
+      }
+      pre {
+        white-space: pre-wrap;
+        font: 12px/1.6 ui-monospace, Consolas, monospace;
+        background: #11151a;
+        border: 1px solid #232a33;
+        border-radius: 8px;
+        padding: 12px;
+      }
+      .pass {
+        color: #3fb950;
+        font-weight: 700;
+      }
+      .fail {
+        color: #f85149;
+        font-weight: 700;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Диагностика аудио-тракта OwnCord</h1>
+    <div class="sub">
+      Проверяем, доходит ли звук из Web Audio через WebRTC в этой сборке Electron.
+      Окно закроется само. Результат сохраняется в файл рядом с программой.
+    </div>
+    <pre id="out">Запуск…</pre>
+    <script>
+      const lines = [];
+      const out = document.getElementById('out');
+      const log = (s) => {
+        lines.push(s);
+        out.innerHTML = lines
+          .join('\n')
+          .replace(/\bPASS\b/g, '<span class="pass">PASS</span>')
+          .replace(/\bFAIL\b/g, '<span class="fail">FAIL</span>');
+        console.log('[PROBE] ' + s);
+      };
+
+      // Замер: уровень на входе энкодера (media-source), счётчики пакетов и —
+      // главное — реальный RMS принятого трека через AnalyserNode.
+      //
+      // ВАЖНО, почему меряем анализатором, а не inbound-rtp.audioLevel:
+      // последний считается на пути ВОСПРОИЗВЕДЕНИЯ и равен нулю, если
+      // приёмный <audio> приглушён. На этом легко поставить ложный диагноз
+      // «звука нет», когда он на самом деле идёт.
+      async function measure(pcSend, pcRecv, analyser, ms = 2500) {
+        const t0 = Date.now();
+        const res = { srcPeak: 0, sent: 0, recv: 0, rms: 0 };
+        const buf = new Float32Array(analyser.fftSize);
+        while (Date.now() - t0 < ms) {
+          (await pcSend.getStats()).forEach((r) => {
+            if (r.type === 'media-source' && r.kind === 'audio' && typeof r.audioLevel === 'number')
+              res.srcPeak = Math.max(res.srcPeak, r.audioLevel);
+            if (r.type === 'outbound-rtp' && r.kind === 'audio' && r.packetsSent != null)
+              res.sent = r.packetsSent;
+          });
+          (await pcRecv.getStats()).forEach((r) => {
+            if (r.type === 'inbound-rtp' && r.kind === 'audio' && r.packetsReceived != null)
+              res.recv = r.packetsReceived;
+          });
+          analyser.getFloatTimeDomainData(buf);
+          let sum = 0;
+          for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+          res.rms = Math.max(res.rms, Math.sqrt(sum / buf.length));
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        return res;
+      }
+
+      async function loopback(track, label) {
+        const pc1 = new RTCPeerConnection();
+        const pc2 = new RTCPeerConnection();
+        pc1.onicecandidate = (e) => e.candidate && pc2.addIceCandidate(e.candidate);
+        pc2.onicecandidate = (e) => e.candidate && pc1.addIceCandidate(e.candidate);
+        const gotRemote = new Promise((res) => (pc2.ontrack = (e) => res(e.track)));
+
+        pc1.addTrack(track, new MediaStream([track]));
+        await pc1.setLocalDescription(await pc1.createOffer());
+        await pc2.setRemoteDescription(pc1.localDescription);
+        await pc2.setLocalDescription(await pc2.createAnswer());
+        await pc1.setRemoteDescription(pc2.localDescription);
+
+        const remote = new MediaStream([await gotRemote]);
+        const el = new Audio();
+        el.srcObject = remote;
+        el.muted = true; // не орём тоном в колонки
+        el.play().catch(() => {});
+
+        const rctx = new AudioContext();
+        await rctx.resume();
+        const an = rctx.createAnalyser();
+        an.fftSize = 2048;
+        rctx.createMediaStreamSource(remote).connect(an);
+
+        const r = await measure(pc1, pc2, an);
+        const ok = r.rms > 0.0005;
+        log(
+          `${ok ? 'PASS' : 'FAIL'}  ${label}\n` +
+            `      вход энкодера=${r.srcPeak.toFixed(5)}  пакеты=${r.sent}/${r.recv}  ` +
+            `ПРИНЯТО RMS=${r.rms.toFixed(5)}`,
+        );
+        try {
+          rctx.close();
+        } catch (e) {}
+        pc1.close();
+        pc2.close();
+        return { ok, ...r };
+      }
+
+      (async () => {
+        const results = {};
+        results._switches = window.probeInfo ? window.probeInfo.switches : '(unknown)';
+        results._platform = navigator.platform;
+        log('Ключи Chromium: ' + results._switches);
+
+        try {
+          // A. Чистый Web Audio без микрофона. Проверяет само утверждение
+          //    «Electron кодирует MediaStreamDestination в тишину».
+          {
+            const ctx = new AudioContext({ latencyHint: 'interactive', sampleRate: 48000 });
+            await ctx.resume();
+            const osc = ctx.createOscillator();
+            osc.frequency.value = 440;
+            const g = ctx.createGain();
+            g.gain.value = 0.3;
+            const dest = ctx.createMediaStreamDestination();
+            osc.connect(g).connect(dest);
+            osc.start();
+            results.A = await loopback(dest.stream.getAudioTracks()[0], 'A: осциллятор -> dest');
+            ctx.close();
+          }
+
+          let mic = null;
+          try {
+            mic = await navigator.mediaDevices.getUserMedia({
+              audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+            });
+            log('Микрофон: ' + mic.getAudioTracks()[0].label);
+            log('ГОВОРИ В МИКРОФОН СЛЕДУЮЩИЕ ~10 СЕКУНД — иначе замеры будут по тишине.');
+          } catch (e) {
+            log('МИКРОФОН НЕДОСТУПЕН: ' + e.name + ' — ' + e.message);
+            results.micError = e.name;
+          }
+
+          if (mic) {
+            const raw = mic.getAudioTracks()[0];
+
+            // B. Сырой микрофон — контроль. Так работает десктоп сейчас.
+            results.B = await loopback(raw, 'B: сырой mic (как в десктопе сейчас)');
+
+            // C. Реальный путь веб-версии: mic -> WebAudio -> dest, ctx 48 кГц.
+            //    Именно эту цепочку автор отключил в десктопе.
+            {
+              const ctx = new AudioContext({ latencyHint: 'interactive', sampleRate: 48000 });
+              await ctx.resume();
+              log('C: ctx.state=' + ctx.state + ' rate=' + ctx.sampleRate);
+              const dest = ctx.createMediaStreamDestination();
+              ctx.createMediaStreamSource(new MediaStream([raw])).connect(dest);
+              results.C = await loopback(
+                dest.stream.getAudioTracks()[0],
+                'C: mic -> WebAudio -> dest, 48 кГц (путь шумодава)',
+              );
+              ctx.close();
+            }
+
+            // D. То же, но частота контекста — родная для железа.
+            //    Если C падает, а D проходит — виноват форс 48 кГц.
+            {
+              const ctx = new AudioContext({ latencyHint: 'interactive' });
+              await ctx.resume();
+              log('D: ctx.state=' + ctx.state + ' rate=' + ctx.sampleRate);
+              const dest = ctx.createMediaStreamDestination();
+              ctx.createMediaStreamSource(new MediaStream([raw])).connect(dest);
+              results.D = await loopback(
+                dest.stream.getAudioTracks()[0],
+                'D: mic -> WebAudio -> dest, частота железа',
+              );
+              ctx.close();
+            }
+
+            // E. Без эхоподавления: AEC Chromium — известный источник
+            //    странностей при заворачивании трека в Web Audio.
+            try {
+              const mic2 = await navigator.mediaDevices.getUserMedia({
+                audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+              });
+              const ctx = new AudioContext({ latencyHint: 'interactive', sampleRate: 48000 });
+              await ctx.resume();
+              const dest = ctx.createMediaStreamDestination();
+              ctx.createMediaStreamSource(mic2).connect(dest);
+              results.E = await loopback(
+                dest.stream.getAudioTracks()[0],
+                'E: mic БЕЗ AEC -> WebAudio -> dest',
+              );
+              ctx.close();
+              mic2.getTracks().forEach((t) => t.stop());
+            } catch (e) {
+              log('E пропущен: ' + e.message);
+            }
+
+            mic.getTracks().forEach((t) => t.stop());
+          }
+        } catch (e) {
+          log('ОШИБКА: ' + (e && e.message));
+          results.error = String(e && e.message);
+        }
+
+        log('');
+        log('=== ИТОГ ===');
+        for (const k of ['A', 'B', 'C', 'D', 'E']) {
+          if (results[k]) log(`  ${k}: ${results[k].ok ? 'PASS' : 'FAIL'}`);
+        }
+        if (window.probeDone) window.probeDone(JSON.stringify(results, null, 2), lines.join('\n'));
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,18 @@
+{
+  "name": "owncord-rtc-audio-probe",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Диагностика: доходит ли звук из Web Audio через WebRTC в этой сборке Electron",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "probe:no-oop-audio": "cross-env SWITCHES=disable-features=AudioServiceOutOfProcess electron .",
+    "probe:no-audio-sandbox": "cross-env SWITCHES=disable-features=AudioServiceSandbox electron .",
+    "probe:autoplay": "cross-env SWITCHES=autoplay-policy=no-user-gesture-required electron .",
+    "probe:all-fixes": "cross-env SWITCHES=disable-features=AudioServiceOutOfProcess,AudioServiceSandbox~~autoplay-policy=no-user-gesture-required electron ."
+  },
+  "devDependencies": {
+    "cross-env": "7.0.3",
+    "electron": "^42.0.1"
+  }
+}
