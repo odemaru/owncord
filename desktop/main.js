@@ -8,7 +8,7 @@
 //      с сервером — десктоп ничего не дублирует локально.
 //   2) Поднимает IPC API для renderer-стороны (preload контролирует
 //      белый список через contextBridge).
-//   3) Регистрирует глобальные хоткеи (см. shortcuts.js) и пробрасывает
+//   3) Регистрирует глобальные хоткеи (см. inputHook.js) и пробрасывает
 //      их в renderer событием 'shortcut:fired'.
 //
 // Что НЕ делает:
@@ -34,8 +34,7 @@ const {
 } = require('electron');
 const path = require('path');
 const config = require('./config');
-const shortcuts = require('./shortcuts');
-const mouseHook = require('./mouseHook');
+const inputHook = require('./inputHook');
 const autoUpdater = require('./autoUpdater');
 const screenPicker = require('./screenPicker/picker');
 const processAudio = require('./processAudio');
@@ -218,8 +217,7 @@ function createWindow() {
   // оба модуля сами фильтруют свой тип acc'а из общей карты.
   mainWindow.webContents.once('did-finish-load', () => {
     if (cfg.hotkeysEnabled) {
-      shortcuts.register(cfg.shortcuts || {}, mainWindow);
-      mouseHook.register(cfg.shortcuts || {}, mainWindow);
+      inputHook.register(cfg.shortcuts || {}, mainWindow);
     }
     // Автообновление: настраиваем после готовности webContents,
     // чтобы первые события (checking/available) долетели до renderer'а.
@@ -433,11 +431,10 @@ ipcMain.handle('config:set', (_e, patch) => {
   // globalShortcut и мышиный uIOhook). Каждый сам отфильтрует свой тип.
   if ('shortcuts' in patch || 'hotkeysEnabled' in patch) {
     if (cfg.hotkeysEnabled) {
-      shortcuts.register(cfg.shortcuts || {}, mainWindow);
-      mouseHook.register(cfg.shortcuts || {}, mainWindow);
+      inputHook.register(cfg.shortcuts || {}, mainWindow);
     } else {
-      shortcuts.unregisterAll();
-      mouseHook.unregisterAll();
+      inputHook.unregisterAll();
+      inputHook.unregisterAll();
     }
   }
   return cfg;
@@ -447,18 +444,23 @@ ipcMain.handle('shortcuts:set', (_e, map) => {
   cfg.shortcuts = { ...(cfg.shortcuts || {}), ...(map || {}) };
   config.save(cfg);
   if (cfg.hotkeysEnabled && mainWindow) {
-    // Сначала клавиатура (быстрее регится), потом мышь (запускает
-    // фоновый поток uIOhook при необходимости). Возвращаем объединённый
-    // список реально зарегистрированных acc'ов — UI это игнорирует, но
-    // полезно для отладки.
-    const kb = shortcuts.register(cfg.shortcuts, mainWindow);
-    const mouse = mouseHook.register(cfg.shortcuts, mainWindow);
-    return [...kb, ...mouse];
+    // И клавиатура, и мышь идут через один пассивный хук uIOhook.
+    //
+    // globalShortcut больше не используется намеренно: он проглатывает
+    // клавишу на уровне ОС, и биндинг на голой букве делал её
+    // ненабираемой во всех приложениях сразу. Пассивный хук событие не
+    // потребляет — нажатие и мьютит, и печатается там, где фокус.
+    // Подробности в шапке inputHook.js.
+    return inputHook.register(cfg.shortcuts, mainWindow);
   }
+  // Хоткеи выключены в настройках — снимаем хук, чтобы не держать
+  // активным слушатель ввода без нужды.
+  inputHook.unregisterAll();
   return [];
 });
 
 ipcMain.handle('shortcuts:get', () => cfg?.shortcuts || {});
+
 
 // Версия приложения. Источник правды — app.getVersion(), который читает
 // version из desktop/package.json при запаковке. Renderer показывает её
@@ -762,14 +764,14 @@ app.on('window-all-closed', () => {
   //
   // На macOS конвенция «закрыл единственное окно — приложение живёт в
   // dock'е». Не выходим.
-  shortcuts.unregisterAll();
-  mouseHook.unregisterAll();
+  inputHook.unregisterAll();
+  inputHook.unregisterAll();
   if (process.platform !== 'darwin') app.quit();
 });
 
 app.on('will-quit', () => {
-  shortcuts.unregisterAll();
-  mouseHook.unregisterAll();
+  inputHook.unregisterAll();
+  inputHook.unregisterAll();
   // Завершаем per-process audio capture (если активен) синхронно,
   // чтобы child .exe не пережил наш main-процесс.
   processAudio.capture.stop().catch(() => {
