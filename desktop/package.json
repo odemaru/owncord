@@ -44,7 +44,7 @@
       "preload.js",
       "config.js",
       "shortcuts.js",
-      "mouseHook.js",
+      "inputHook.js",
       "autoUpdater.js",
       "processAudio.js",
       "screenPicker/**/*",
